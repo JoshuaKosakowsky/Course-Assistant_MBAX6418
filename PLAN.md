@@ -18,11 +18,21 @@ Status legend: `pending` (not started) · `in progress` · `done`.
 - **Definition of done:** any teammate can clone, install, and run the empty app; issues exist with checks.
 
 ## Phase 1 — Materials ingestion
-- [ ] Decide and document accepted formats (PDF first; others TBD);
-      reject clearly with a helpful message otherwise
-- [ ] Parse documents: extract text preserving source metadata (doc, page/slide, section); render/keep original page and slide images
-- [ ] Sample corpus in `data/` (gitignored): syllabus + at least one slide deck from Canvas
-- [ ] Small CLI/script: `python -m app.ingest <file>` -> verified text + images on disk
+- [x] Formats decided and documented in README: PDF direct; PPTX via
+      LibreOffice conversion (or manual export); others rejected with guidance
+- [x] Parser extracts text preserving source metadata (doc_id, page); renders
+      page images (150 dpi PNG) for visual evidence (app/parse.py)
+- [x] Document management (Task 1): add with content dedup (sha256), list,
+      remove with cascade delete of corpus copy + artifacts + record;
+      removal hooks for future indexes (app/documents.py)
+- [ ] PPTX conversion verified with LibreOffice installed (dev machines lack
+      it; manual-export workaround documented) — **unverified**
+- [ ] Sample corpus in `data/` (gitignored): syllabus + at least one slide
+      deck from Canvas
+- [ ] CLI/script: `python -m app.ingest <file>` -> verified text + images
+- [ ] Gradio material-management UI (add/remove/list via the app) — tracked
+      in issue #7
+
 - **Definition of done:** a sample PDF and deck produce text + page/slide images; spot-check shows fidelity (no garbled text, images intact).
 
 ## Phase 2 — Indexing (chunking + separate stores)
