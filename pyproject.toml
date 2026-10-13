@@ -1,0 +1,8 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-m 'unit or smoke'"
+markers = [
+    "unit: fast, offline tests of pure logic (default run)",
+    "smoke: minimal cross-component wiring tests on fixtures (default run)",
+    "e2e: tests against real class endpoints; requires .env keys (opt-in)",
+]
