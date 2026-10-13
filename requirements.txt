@@ -13,6 +13,7 @@ requests
 
 # Document parsing & images
 pypdf
+pymupdf
 pillow
 
 # Config & env
