@@ -1,5 +1,7 @@
 # Course Assistant — MBAX 6418-801 (Assignment 2)
 
+![CI](https://github.com/JoshuaKosakowsky/Course-Assistant_MBAX6418/actions/workflows/ci.yml/badge.svg)
+
 A course assistant that answers questions and generates practice quizzes from
 course materials (slides, syllabus, and other files downloaded from Canvas).
 Built on hybrid RAG: keyword search + text embeddings + visual embeddings,
@@ -71,3 +73,12 @@ review what was verified and what remains unchecked.
 
 - Ownership of substantial tasks via GitHub issues (with completion checks).
 - Work flows through branches, commits, pull requests, and reviews.
+
+## Contributing
+
+- **Agents:** read [AGENTS.md](AGENTS.md) first — it governs AI coding agents.
+- **Contributors:** [CONTRIBUTING.md](CONTRIBUTING.md) — workflow, issue
+  claiming, bug reports, review expectations.
+- Commit conventions: [docs/COMMITS.md](docs/COMMITS.md)
+- Test tiers: [docs/TESTING.md](docs/TESTING.md) — `pytest` = unit + smoke;
+  `pytest -m e2e` needs class keys.
