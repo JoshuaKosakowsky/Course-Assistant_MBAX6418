@@ -11,9 +11,10 @@ Status legend: `pending` (not started) · `in progress` · `done`.
 
 ## Phase 0 — Repo & collaboration setup (this scaffold)
 - [x] Git repo initialized (`main` branch), `.gitignore`, README, `.env.example` (dummy values only)
-- [ ] GitHub remote created; branch policy agreed (working branches + PRs; `main` protected or reviewed)
-- [ ] Team fills `.env` with class endpoint details (dobolyi.com, ports 9001+) — **blocker for Phase 1+**
-- [ ] Substantial tasks filed as GitHub issues with completion checks; ownership chosen
+- [x] GitHub remote created: **https://github.com/JoshuaKosakowsky/Course-Assistant_MBAX6418** (private) — initial commit pushed
+- [ ] Branch policy agreed (working branches + PRs; `main` protected or reviewed)
+- [x] Substantial tasks filed as GitHub issues **#1–#9** with completion checks; ownership chosen by team
+- [ ] Team fills `.env` with class endpoint details (dobolyi.com, ports 9001+) — vision LLM confirmed (9001, Qwen3.6-35B); embeddings/rerank/parse pending
 - **Definition of done:** any teammate can clone, install, and run the empty app; issues exist with checks.
 
 ## Phase 1 — Materials ingestion
