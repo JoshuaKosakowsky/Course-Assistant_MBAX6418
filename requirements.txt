@@ -1,0 +1,22 @@
+# Core retrieval
+bm25s
+langchain-text-splitters
+chromadb
+
+# Interface
+gradio
+
+# LLM / embedding API clients (class endpoints are OpenAI-compatible
+# where applicable; the openai client also works for custom base_urls)
+openai
+requests
+
+# Document parsing & images
+pypdf
+pillow
+
+# Config & env
+python-dotenv
+
+# Testing
+pytest
