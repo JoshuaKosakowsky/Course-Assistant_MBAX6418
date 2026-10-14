@@ -29,7 +29,12 @@ from .config import DATA_ROOT
 
 def _make_writable(path: Path) -> None:
     """Clear read-only attributes (OneDrive marks synced directories and
-    their contents read-only on Windows, which blocks deletion)."""
+    their contents read-only on Windows, which blocks deletion).
+
+    Uses S_IRWXU on purpose: on Windows any chmod including the write bit
+    clears the read-only attribute; on POSIX it restores owner rwx, which
+    rmtree needs to descend into directories (a bare write bit would strip
+    read/execute and break deletion there)."""
     targets = [path]
     if path.is_dir():
         targets = [
@@ -39,7 +44,7 @@ def _make_writable(path: Path) -> None:
         ]
     for target in targets:
         try:
-            os.chmod(target, stat.S_IWRITE)
+            os.chmod(target, stat.S_IRWXU)
         except OSError:
             pass
 
