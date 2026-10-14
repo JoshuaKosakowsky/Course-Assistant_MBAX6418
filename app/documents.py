@@ -15,13 +15,51 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
+import stat
+import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
 from .config import DATA_ROOT
+
+
+def _make_writable(path: Path) -> None:
+    """Clear read-only attributes (OneDrive marks synced directories and
+    their contents read-only on Windows, which blocks deletion)."""
+    targets = [path]
+    if path.is_dir():
+        targets = [
+            Path(root) / name
+            for root, dirs, files in os.walk(path)
+            for name in dirs + files
+        ]
+    for target in targets:
+        try:
+            os.chmod(target, stat.S_IWRITE)
+        except OSError:
+            pass
+
+
+def _delete_with_retry(path: Path, retries: int = 3, delays=(0.5, 2.0, 4.0)) -> Path | None:
+    """Delete a file or directory, retrying on transient locks (Windows
+    file/OneDrive sync can hold a handle for several seconds). Returns the
+    path if it still exists after all attempts, else None."""
+    for attempt in range(retries):
+        try:
+            _make_writable(path)
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+            return None
+        except OSError:
+            if attempt < retries - 1:
+                time.sleep(delays[attempt])
+    return path if path.exists() else None
 
 
 def _sha256(path: Path) -> str:
@@ -72,6 +110,7 @@ class DocumentStore:
     def add(self, source: Path) -> Document:
         """Register a file in the library. Idempotent by content: a second
         load of the same bytes returns the existing Document unchanged."""
+        self.cleanup_orphans()  # sweep leftovers from earlier removes
         source = Path(source)
         if not source.is_file():
             raise FileNotFoundError(source)
@@ -106,22 +145,37 @@ class DocumentStore:
             raise DocumentNotFoundError(doc_id)
         return Document.from_dict(json.loads(record.read_text(encoding="utf-8")))
 
+    def find(self, source: Path) -> Document | None:
+        """Return the library document for a file if its content is already
+        stored, else None. Powers the UI's 'already in library' message."""
+        source = Path(source)
+        return self._find_by_sha(_sha256(source)) if source.is_file() else None
+
+    def corpus_path(self, doc_id: str) -> Path:
+        """Path of the stored corpus copy for a document (the authoritative
+        file to parse — content-addressed, independent of the upload path)."""
+        directory = self.corpus_dir / doc_id
+        files = list(directory.glob("*")) if directory.is_dir() else []
+        if not files:
+            raise DocumentNotFoundError(doc_id)
+        return files[0]
+
     def remove(self, doc_id: str) -> None:
         """Delete a document and ALL of its searchable content: corpus copy,
-        parsed artifacts, and the library record. Removes nothing if the
-        document is unknown. Returns the removed document."""
+        parsed artifacts, and the library record. The record is always
+        removed (a remaining entry would let later answers rely on a deleted
+        document); artifacts/corpus deletion retries on transient Windows
+        locks. Raises DocumentNotFoundError for unknown ids."""
         self.get(doc_id)  # raises DocumentNotFoundError when unknown
         for hook in self._removal_hooks:
             hook(doc_id)
-        artifacts = self.artifacts_dir / doc_id
-        corpus = self.corpus_dir / doc_id
+        for target in (self.artifacts_dir / doc_id, self.corpus_dir / doc_id):
+            _delete_with_retry(target)
         record = self.library_dir / f"{doc_id}.json"
-        if artifacts.is_dir():
-            shutil.rmtree(artifacts)
-        if corpus.is_dir():
-            shutil.rmtree(corpus)
-        if record.is_file():
-            record.unlink()
+        if record.exists() and _delete_with_retry(record):
+            raise OSError(f"Could not delete library record {record}")
+        # NOTE: artifact/corpus dirs still locked after retries are swept by
+        # cleanup_orphans() on the next add(); indexes are purged via hooks.
 
     # -- removal hooks (search indexes register here in Phase 2) ------------
 
@@ -130,6 +184,19 @@ class DocumentStore:
         Phase 2 indexes (bm25s, chromadb) register here so a removed
         document's chunks and embeddings are purged."""
         self._removal_hooks.append(hook)
+
+    def cleanup_orphans(self) -> list[Path]:
+        """Delete artifacts/corpus directories whose library record no
+        longer exists (leftovers from removes that hit transient locks).
+        Returns the paths removed. Cheap enough to run on every add()."""
+        known = {d.doc_id for d in self.list()}
+        removed: list[Path] = []
+        for base in (self.artifacts_dir, self.corpus_dir):
+            for entry in list(base.glob("*")):
+                if entry.is_dir() and entry.name not in known:
+                    if _delete_with_retry(entry) is None:
+                        removed.append(entry)
+        return removed
 
     # -- internals ----------------------------------------------------------
 
