@@ -30,8 +30,8 @@ Status legend: `pending` (not started) · `in progress` · `done`.
 - [ ] Sample corpus in `data/` (gitignored): syllabus + at least one slide
       deck from Canvas
 - [ ] CLI/script: `python -m app.ingest <file>` -> verified text + images
-- [ ] Gradio material-management UI (add/remove/list via the app) — tracked
-      in issue #7
+- [x] Gradio material-management UI (add/remove/list via the app, `python -m
+      app.ui`; dedup handled by the store) — Task 1 complete
 
 - **Definition of done:** a sample PDF and deck produce text + page/slide images; spot-check shows fidelity (no garbled text, images intact).
 

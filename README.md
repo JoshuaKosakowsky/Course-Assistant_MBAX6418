@@ -44,9 +44,11 @@ reranked before the best evidence (text + images) is passed to the LLM.
 ```bash
 git clone <repo-url> && cd Course-Assistant_MBAX6418
 python -m venv .venv
-# Windows: .venv\Scripts\activate   |   macOS/Linux: source .venv/bin/activate
+# Windows: .venv\Scripts\activate | macOS/Linux: source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env      # then fill in real values (see below)
+cp .env.example .env     # then fill in real values
+pytest                   # unit + smoke (offline)
+python -m app.ui         # launch the Gradio management UI
 ```
 
 ### Class services

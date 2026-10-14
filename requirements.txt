@@ -5,6 +5,7 @@ chromadb
 
 # Interface
 gradio
+pandas
 
 # LLM / embedding API clients (class endpoints are OpenAI-compatible
 # where applicable; the openai client also works for custom base_urls)
