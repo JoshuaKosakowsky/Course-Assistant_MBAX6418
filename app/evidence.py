@@ -58,7 +58,8 @@ class EvidenceItem:
     methods: Tuple[str, ...]        # which retrievers found this chunk
     evidence_ranks: Tuple[RankedEvidence, ...]   # per-method rank + raw score
     image_included: bool            # image content was used during reranking
-    image_source: str               # "artifact" | "visual_index" | "none"
+    image_source: str               # "artifact" | "visual_index" | "visual_index_external" | "none"
+    image_verified: bool            # safe to cite as an ORIGINAL page image
     warnings: Tuple[str, ...] = ()
 
 
@@ -99,7 +100,10 @@ class EvidencePack:
                     document=item.filename,
                     page=item.page_no,
                     excerpt=item.excerpt,
-                    image_path=item.image_path,
+                    # ONLY verified original page images are citable;
+                    # unverified visual claims stay candidates, never
+                    # presented as originals.
+                    image_path=item.image_path if item.image_verified else None,
                 )
             )
         return sources
@@ -205,6 +209,7 @@ def item_from_fused(
         evidence_ranks=hit.evidence,
         image_included=image_included,
         image_source="artifact" if path else "none",
+        image_verified=path is not None,
         warnings=tuple(warnings),
     )
 
@@ -247,6 +252,7 @@ def item_from_visual(
         evidence_ranks=(),
         image_included=False,
         image_source="visual_index" if image_path else "none",
+        image_verified=False,  # raw visual claim: not proven original
         warnings=tuple(warnings),
     )
 
@@ -297,6 +303,7 @@ def item_from_page_candidate(
         evidence_ranks=evidence_ranks,
         image_included=image_included,
         image_source=pc.image_source,
+        image_verified=pc.image_verified,
         warnings=tuple(warnings),
     )
 

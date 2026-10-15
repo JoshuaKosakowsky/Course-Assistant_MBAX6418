@@ -120,9 +120,10 @@ def test_page_fusion_combines_rankings():
     pages = fuse_pages(fused, visual)
     assert pages[0].doc_id == "doc-a" and pages[0].page_no == 1
     assert "visual" in pages[0].methods
-    # page rrf = text fused score (2 methods) + 1/(60+1)
-    assert pages[0].page_rrf > 0.05
-    assert pages[1].doc_id == "doc-b"
+    # one RRF term per method: keyword(1) + vector(2) + visual(1)
+    assert pages[0].page_rrf == pytest.approx(1 / 61 + 1 / 62 + 1 / 61)
+    assert pages[0].page_rrf > pages[1].page_rrf  # doc-b: keyword+vector only
+    assert pages[1].page_rrf == pytest.approx(1 / 61 + 1 / 62)
 
 
 # 4. document/page matching --------------------------------------------------
@@ -262,8 +263,8 @@ def test_fusion_is_rank_based_not_vector_based():
     # absurd fake distances/dims are irrelevant to RRF
     visual = [make_visual(doc_id="doc-a", page=1, rank=3, distance=12345.0)]
     pages = fuse_pages(fused, visual)
-    expected = 0.05 + 1.0 / (60 + 3)
-    assert pages[0].page_rrf == pytest.approx(expected)
+    # keyword r1 + vector r2 (from mk_hit evidence) + visual r3
+    assert pages[0].page_rrf == pytest.approx(1 / 61 + 1 / 62 + 1 / 63)
 
 
 # 15. provenance preserved -----------------------------------------------------------
@@ -352,3 +353,201 @@ def test_page_evidence_compatible_with_source_contract(tmp_path):
     # rank_metrics works on the page-evidence item type
     m = rank_metrics([item], "a.pdf", k=3, expected_page=2)
     assert m["top1"] is True
+
+
+# 19. page-length bias: one contribution per method (Sec.4) ------------------------
+
+def test_many_chunks_do_not_inflate_page_score():
+    """A page with TEN relevant chunks must NOT outrank a page with ONE
+    equally-relevant chunk — each retrieval method counts once per page."""
+    ten_chunks = [mk_hit(mk_chunk(f"c{i}", doc_id="doc-a", page_no=1,
+                                  text="same relevance"), fused_rank=1)
+                  for i in range(10)]
+    one_chunk = [mk_hit(mk_chunk("x", doc_id="doc-b", page_no=1,
+                                 text="same relevance"), fused_rank=1)]
+    pages = fuse_pages(ten_chunks + one_chunk, [])
+    by_doc = {p.doc_id: p for p in pages}
+    assert by_doc["doc-a"].page_rrf == pytest.approx(
+        by_doc["doc-b"].page_rrf)  # both: keyword r1 + vector r1
+    assert len(by_doc["doc-a"].text_chunks) == 10  # provenance preserved
+
+
+def test_multimethod_boost():
+    """A page found by keyword AND vector AND visual gets three terms;
+    a page found by one method gets one."""
+    multi = [mk_hit(mk_chunk("c1", doc_id="doc-a", page_no=1, text="t"),
+                    fused_rank=1, methods=("keyword", "vector"))]
+    single = [mk_hit(mk_chunk("c2", doc_id="doc-b", page_no=1, text="t"),
+                     fused_rank=1, methods=("keyword",))]
+    visual = [make_visual("doc-a", 1, rank=1)]
+    pages = fuse_pages(multi + single, visual)
+    a = next(p for p in pages if p.doc_id == "doc-a")
+    b = next(p for p in pages if p.doc_id == "doc-b")
+    assert a.page_rrf == pytest.approx(1 / 61 + 1 / 62 + 1 / 61)
+    assert b.page_rrf == pytest.approx(1 / 61)   # keyword only
+    assert a.page_rrf > b.page_rrf
+
+
+def test_ties_deterministic():
+    p1 = [mk_hit(mk_chunk("a", doc_id="doc-a", page_no=1), fused_rank=1)]
+    p2 = [mk_hit(mk_chunk("b", doc_id="doc-b", page_no=1), fused_rank=1)]
+    r1 = fuse_pages(p1 + p2, [])
+    r2 = fuse_pages(p1 + p2, [])
+    assert [p.doc_id for p in r1] == [p.doc_id for p in r2]
+    assert r1[0].page_rrf == r1[1].page_rrf
+
+
+def test_duplicate_visual_hits_single_contribution():
+    """Two visual hits for the SAME page contribute ONE method term."""
+    fused = [mk_hit(mk_chunk("c1", doc_id="doc-a", page_no=1), fused_rank=1)]
+    dup = [make_visual("doc-a", 1, rank=1, distance=0.9, vid="d1"),
+           make_visual("doc-a", 1, rank=2, distance=0.1, vid="d2")]
+    pages = fuse_pages(fused, dup)
+    assert pages[0].page_rrf == pytest.approx(
+        1 / 61 + 1 / 62 + 1 / 61)  # keyword r1 + vector r2 + ONE visual r2
+    assert pages[0].visual.visual_id == "d2"  # best distance kept
+
+
+# 20. provenance tiers: verified vs candidate-only images (Sec.5) ------------------
+
+def test_external_image_is_candidate_only_not_verified(tmp_path):
+    store, rec = make_store_with_doc(tmp_path)
+    img = tmp_path / "external.png"   # NOT under artifacts; arbitrary name
+    make_png(img)
+    src = StubSource(hits=[type("VH", (), {"doc_id": rec.doc_id, "page": 1,
+                                           "image_path": str(img), "id": "i1",
+                                           "distance": 0.1})()])
+    cand = VisualSourceAdapter(src, store=store).query_text("q")[0]
+    assert cand.image_path == str(img)  # still a retrieval candidate
+
+    fused = [mk_hit(mk_chunk("c1", doc_id=rec.doc_id, page_no=1, text="text"))]
+    pages = fuse_pages(fused, [cand], store=store)
+    pc = pages[0]
+    assert pc.image_source == "visual_index_external"
+    assert pc.image_verified is False
+    from app.evidence import EvidencePack, item_from_page_candidate
+    item = item_from_page_candidate(pc, 1, 0.9, True)
+    assert item.image_verified is False
+    assert item.image_path is not None          # candidate retains the image
+    sources = EvidencePack(query="q", items=[item]).to_sources()
+    if sources:  # excerpt exists -> source emitted, but unverified image dropped
+        assert sources[0].image_path is None
+    assert any("unverified" in w for w in pc.warnings)
+
+
+def test_artifact_image_is_verified(tmp_path):
+    """A manifest-validated artifact image is a VERIFIED original."""
+    store, rec = make_store_with_doc(tmp_path)
+    adir = store.artifacts_dir / rec.doc_id
+    (adir / "pages").mkdir(parents=True)
+    img = adir / "pages" / "page-001.png"
+    make_png(img)
+    import json
+    (adir / "manifest.json").write_text(json.dumps({
+        "pages": [{"number": 1, "text": "t", "image_path": str(img),
+                   "embedded_images": 0}]}), encoding="utf-8")
+    fused = [mk_hit(mk_chunk("c1", doc_id=rec.doc_id, page_no=1,
+                             text="t", image_path=str(img)), fused_rank=1)]
+    pages = fuse_pages(fused, [], store=store)
+    assert pages[0].image_source == "artifact"
+    assert pages[0].image_verified is True
+
+
+# 21. production visual query model selection (Sec.3) --------------------------------
+
+def test_unified_visual_embedder_uses_9003_model(monkeypatch):
+    import app.config as cfg
+    monkeypatch.setattr(cfg, "VISUAL_EMBED_BASE_URL", "http://x.test:9003/v1")
+    monkeypatch.setattr(cfg, "VISUAL_EMBED_API_KEY", "test-key")
+    calls = {}
+
+    class FakeResp:
+        status_code = 200
+
+        def json(self):
+            return {"data": [{"embedding": [0.1] * 4}]}
+
+    class FakeSession:
+        def post(self, url, headers=None, json=None, timeout=None):
+            calls.update(url=url, headers=headers, json=json)
+            return FakeResp()
+
+    from app.visual_retrieval import unified_visual_text_embedder
+    emb = unified_visual_text_embedder(session=FakeSession())
+    vec = emb("what is this chart?")
+    assert len(vec) == 4
+    assert calls["url"] == "http://x.test:9003/v1/embeddings"
+    assert calls["json"]["model"] == "Qwen/Qwen3-VL-Embedding-2B"
+    assert calls["json"]["input"] == ["what is this chart?"]
+    assert calls["headers"]["Authorization"].startswith("Bearer ")
+
+
+def test_unified_visual_embedder_rejects_port_9000(monkeypatch):
+    import app.config as cfg
+    monkeypatch.setattr(cfg, "VISUAL_EMBED_BASE_URL", "http://dobolyi.com:9000/v1")
+    monkeypatch.setattr(cfg, "VISUAL_EMBED_API_KEY", "test-key")
+    from app.visual_retrieval import unified_visual_text_embedder
+    with pytest.raises(ValueError):
+        unified_visual_text_embedder()
+
+
+def test_unified_visual_embedder_requires_key(monkeypatch):
+    import app.config as cfg
+    monkeypatch.setattr(cfg, "VISUAL_EMBED_BASE_URL", "http://x.test:9003/v1")
+    monkeypatch.setattr(cfg, "VISUAL_EMBED_API_KEY", "")
+    from app.visual_retrieval import unified_visual_text_embedder, VisualQueryError
+    with pytest.raises(VisualQueryError):
+        unified_visual_text_embedder()
+
+
+def test_production_retrieve_injects_unified_embedder(monkeypatch):
+    """production_retrieve must select the 9003 unified embedder — never
+    silently fall through to the source's own (9002) text bridge."""
+    import app.retrieval as retrieval_mod
+
+    injected = []
+
+    def fake_factory(session=None):
+        injected.append(True)
+
+        def emb(text):
+            return [0.1] * 4
+        return emb
+
+    monkeypatch.setattr(retrieval_mod, "unified_visual_text_embedder", fake_factory)
+    monkeypatch.setenv("CLASS_API_KEY", "k")
+
+    class FakeKw:
+        def search(self, query, top_k=5, doc_ids=None):
+            return []
+
+    class FakeVisual:
+        def query_embedding(self, embedding, k=5):
+            return [type("VH", (), {"doc_id": "doc-1", "page": 3,
+                                    "image_path": "", "id": "i1",
+                                    "distance": 0.1})()]
+
+    outcome = retrieval_mod.production_retrieve(
+        "chart page", keyword=FakeKw(), visual_index=FakeVisual())
+    assert injected == [True]
+    assert outcome.stages["visual"] == "ok"
+    assert any(i.doc_id == "doc-1" for i in outcome.visual_items)
+
+
+def test_production_retrieve_degrades_when_visual_unconfigured(monkeypatch):
+    import app.retrieval as retrieval_mod
+    from app.visual_retrieval import VisualQueryError
+
+    def failing(session=None):
+        raise VisualQueryError("no key")
+
+    monkeypatch.setattr(retrieval_mod, "unified_visual_text_embedder", failing)
+
+    class FakeKw:
+        def search(self, query, top_k=5, doc_ids=None):
+            return []
+
+    outcome = retrieval_mod.production_retrieve(
+        "q", keyword=FakeKw(), visual_index=object())
+    assert outcome.stages["visual"] == "degraded"
+    assert any("visual" in w for w in outcome.warnings)

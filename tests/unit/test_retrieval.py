@@ -391,7 +391,8 @@ def test_visual_candidates_fused_at_page_level(tmp_path):
     assert top.filename == "a.pdf" and top.page_no == 1
     assert "visual" in top.methods
     assert top.image_path is not None  # visual image became the page image
-    assert top.image_source == "visual_index"
+    assert top.image_source == "visual_index_external"  # unverifiable claim
+    assert top.image_verified is False
     assert any(e.method == "visual" for e in top.evidence_ranks)
 
 
@@ -408,3 +409,71 @@ def test_visual_failure_degrades_to_text_only(tmp_path):
     assert outcome.stages["visual"] == "degraded"
     assert outcome.evidence.items  # text evidence survives
     assert any("visual" in w for w in outcome.warnings)
+
+
+
+# 19. visual-only retrieval runs even when text finds nothing (Sec.2) ------------
+
+def test_visual_only_page_retrieved_without_text(tmp_path):
+    """REGRESSION: keyword+semantic return NOTHING, but the visual index
+    finds the image-only page — it must reach the reranker payload and
+    the evidence pack, with no invented excerpt."""
+    store = DocumentStore(root=tmp_path / "data")
+    src = tmp_path / "a.pdf"
+    d = pymupdf.open(); pg = d.new_page()
+    pg.insert_text((72, 72), "free cash flow overview")
+    d.save(str(src)); d.close()
+    rec = store.add(src)
+    kw = KeywordIndex()                # empty: no matches for anything
+    vec = TextVectorIndex(FakeEmbedder(), persist_dir=tmp_path / "db")
+    # empty vector index too
+
+    img = tmp_path / "chart-page.png"  # visual-only page image
+    d = pymupdf.open(); pg = d.new_page()
+    pg.draw_rect(pymupdf.Rect(50, 50, 200, 150), color=(0.2, 0.4, 0.9),
+                 fill=(0.2, 0.4, 0.9))
+    pg.get_pixmap(dpi=72).save(str(img)); d.close()
+
+    class VisualOnlySource:
+        def query_embedding(self, embedding, k=5):
+            return [type("VH", (), {"doc_id": rec.doc_id, "page": 1,
+                                    "image_path": str(img), "id": "v1",
+                                    "distance": 0.05})()]
+
+    reranker = StubReranker()
+    outcome = retrieve("which page shows a bar chart?",
+                       keyword=kw, vector=vec, reranker=reranker,
+                       store=store, top_k=3,
+                       visual_source=VisualOnlySource(),
+                       text_to_visual_embedder=lambda t: [0.1] * 8)
+    assert outcome.fused == []                 # text found nothing
+    assert outcome.stages["visual"] == "ok"
+    assert outcome.stages["rerank"] == "ok"    # page-level rerank ran
+    assert outcome.evidence.items, "visual-only evidence must exist"
+    top = outcome.evidence.items[0]
+    assert top.excerpt is None                 # never invented
+    assert top.image_path == str(img)
+    assert any("no extractable text" in w for w in top.warnings)
+    # the reranker really received the image (multimodal payload)
+    docs = reranker.payloads[0]["documents"]
+    assert any(isinstance(x, dict) and "image_url" in str(x) for x in docs)
+
+
+def test_visual_retrieval_respects_doc_filters_without_text(tmp_path):
+    store = DocumentStore(root=tmp_path / "data")
+    src = tmp_path / "a.pdf"
+    d = pymupdf.open(); pg = d.new_page(); pg.insert_text((72, 72), "x")
+    d.save(str(src)); d.close()
+    rec = store.add(src)
+
+    class VisualSource:
+        def query_embedding(self, embedding, k=5):
+            return [type("VH", (), {"doc_id": rec.doc_id, "page": 1,
+                                    "image_path": "", "id": "v1",
+                                    "distance": 0.05})()]
+
+    outcome = retrieve("chart", keyword=KeywordIndex(), vector=None,
+                       store=store, visual_source=VisualSource(),
+                       text_to_visual_embedder=lambda t: [0.1] * 8,
+                       doc_ids=["some-other-doc"])
+    assert outcome.visual_items == []  # filtered out client-side

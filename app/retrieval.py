@@ -30,8 +30,10 @@ from app.fusion import FusedHit, FusionEngine
 from app.rerank import RerankClient, RerankOutcome, rerank_fused
 from app.visual_retrieval import (
     VisualSourceAdapter,
+    VisualQueryError,
     fuse_pages,
     page_candidate_to_hit,
+    unified_visual_text_embedder,
 )
 
 
@@ -146,11 +148,13 @@ def retrieve(
         for d in engine.degraded:
             outcome.warnings.append(f"retrieval degraded: {d}")
 
-    # 5. visual-index retrieval — FUSED at page level, not a side list
+    # 5. visual-index retrieval — FUSED at page level, not a side list.
+    # Runs INDEPENDENTLY of text retrieval: visual-only pages must be
+    # discoverable even when keyword/vector search find nothing.
     visual_candidates = []
     pages: Optional[list] = None
     outcome.stages["visual"] = "skipped"
-    if visual_source is not None and outcome.fused:
+    if visual_source is not None:
         try:
             adapter = VisualSourceAdapter(visual_source, store=store)
             if text_to_visual_embedder is not None:
@@ -160,6 +164,17 @@ def retrieve(
                 visual_candidates = adapter.query_embedding(
                     text_to_visual_embedder(text), k=visual_k, doc_ids=doc_ids)
             else:
+                # NO silent cross-space fallback: using the source's own
+                # text bridge (PR #11's query_text) is flagged explicitly,
+                # because the class 9002 bridge is dimension-compatible but
+                # NOT in the visual model's space. production_retrieve()
+                # always injects the 9003 unified embedder instead.
+                outcome.warnings.append(
+                    "visual query used the source's own text bridge — for "
+                    "class endpoints this is the INCOMPATIBLE 9002 space; "
+                    "inject the 9003 unified embedder (production_retrieve "
+                    "does this automatically)"
+                )
                 visual_candidates = adapter.query_text(
                     text, k=visual_k, doc_ids=doc_ids)
             outcome.stages["visual"] = "ok"
@@ -167,7 +182,10 @@ def retrieve(
                 item_from_visual(vc, i, store=store)
                 for i, vc in enumerate(visual_candidates, start=1)
             ]
-            pages = fuse_pages(outcome.fused, visual_candidates, store=store)
+            # page-level fusion only when visual candidates exist; with
+            # none, the chunk-level text path is unchanged
+            if visual_candidates:
+                pages = fuse_pages(outcome.fused, visual_candidates, store=store)
         except Exception as exc:
             outcome.stages["visual"] = "degraded"
             outcome.warnings.append(f"visual retrieval failed: {exc}")
@@ -237,4 +255,51 @@ def retrieve(
         warnings=list(outcome.warnings),
     )
 
+    return outcome
+
+
+def production_retrieve(
+    query: str,
+    *,
+    keyword,
+    vector=None,
+    store=None,
+    reranker=None,
+    visual_index=None,
+    visual_k: int = 5,
+    top_k: int = 5,
+    candidate_k: int = 20,
+    doc_ids=None,
+    include_images: bool = True,
+    max_images: int = 10,
+) -> RetrievalOutcome:
+    """PRODUCTION wiring for the full pipeline.
+
+    Chooses the CORRECT class services automatically:
+      - text-semantic retrieval: 9002 Nemotron (via ``vector``),
+      - visual queries: the SAME 9003 model that indexed the visual
+        vectors (unified space) — NEVER the incompatible 9002 bridge.
+    If the 9003 query embedder cannot be configured, visual retrieval is
+    reported degraded (a warning is appended) and the text pipeline
+    continues. Fake embedders are never constructed here — offline tests
+    use ``retrieve`` directly with injected stubs.
+    """
+    text_to_visual = None
+    pre_warning = None
+    if visual_index is not None:
+        try:
+            text_to_visual = unified_visual_text_embedder()
+        except VisualQueryError as exc:
+            visual_index = None  # degrade loudly, keep text pipeline
+            pre_warning = f"visual retrieval disabled: {exc}"
+    outcome = retrieve(
+        query, keyword=keyword, vector=vector, store=store,
+        reranker=reranker, top_k=top_k, candidate_k=candidate_k,
+        doc_ids=doc_ids, include_images=include_images,
+        visual_source=visual_index, visual_k=visual_k,
+        text_to_visual_embedder=text_to_visual, max_images=max_images,
+    )
+    if pre_warning:
+        outcome.warnings.insert(0, pre_warning)
+        outcome.stages["visual"] = "degraded"
     return outcome

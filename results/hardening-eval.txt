@@ -1,0 +1,40 @@
+
+======================================================================
+HARDENING EVAL (deterministic, offline, fake embeddings)
+======================================================================
+
+
+======================================================================
+A) VISUAL-ONLY PAGE (text finds nothing)
+======================================================================
+text fused candidates : 0
+stages                : {'keyword': 'ok', 'semantic': 'ok', 'fusion': 'ok', 'visual': 'ok', 'rerank': 'ok'}
+evidence items        : 1
+  excerpt             : None (preserved empty, not invented)
+  image_path          : bar-chart.png
+  image_source        : visual_index_external  verified=False
+reranker requests     : 1  images in payload: 1
+VERDICT: visual-only page retrieved, image reached reranker and evidence; text empty
+
+======================================================================
+B) PAGE-LENGTH BIAS (5-chunk page vs 1-chunk page, same ranks)
+======================================================================
+doc-a (5 chunks) rrf : 0.032522
+doc-b (1 chunk)  rrf : 0.032522  (equal: one term per method)
+doc-a chunks kept    : 5 (provenance retained)
+
+======================================================================
+C) CROSS-DOCUMENT MISLABEL (page-001.png from another doc)
+======================================================================
+visual item image    : page-001.png (page-001.png)
+warnings             : []
+page evidence image  : 'C:\\Users\\matty\\AppData\\Local\\Temp\\hardening-6otyvb11\\fake-artifacts-a\\pages\\page-001.png'
+image_source/verified: visual_index_external/False
+VERDICT: held as unverified candidate
+
+======================================================================
+D) VISUAL ENDPOINT UNAVAILABLE
+======================================================================
+stages : {'keyword': 'ok', 'semantic': 'ok', 'fusion': 'ok', 'visual': 'degraded', 'rerank': 'ok'}
+warning: visual retrieval failed: 9003 connect failed
+rerank : 1 request(s), text-only evidence 1 item(s)

@@ -199,7 +199,15 @@ class VisualSourceAdapter:
 @dataclass
 class PageCandidate:
     """One page in the fused ranking: text evidence (all chunks) plus an
-    optional visual hit, ranked by page-level RRF."""
+    optional visual hit, ranked by page-level RRF.
+
+    ``image_source``: ``artifact`` (verified original from the parser's
+    manifest), ``visual_index`` (visual-index image that ALSO validates
+    as the claimed document's artifact), ``visual_index_external`` (visual-
+    index image outside the artifacts that is NOT provably the claimed
+    page's original), or ``none``. ``image_verified`` separates "safe to
+    cite as an original page image" from "retrieval candidate only".
+    """
 
     doc_id: str
     page_no: int
@@ -211,8 +219,19 @@ class PageCandidate:
     best_chunk: Optional[FusedHit]
     visual: Optional[VisualCandidate]
     image_path: Optional[str]
-    image_source: str  # "artifact" | "visual_index" | "none"
+    image_source: str  # artifact | visual_index | visual_index_external | none
+    image_verified: bool
     warnings: List[str] = field(default_factory=list)
+
+
+@dataclass
+class _PageState:
+    """Internal fusion state for one page: one RRF contribution per
+    retrieval METHOD (best rank within that method), never per chunk."""
+
+    best_rank: Dict[str, int] = field(default_factory=dict)
+    chunks: List[FusedHit] = field(default_factory=list)
+    visual: Optional[VisualCandidate] = None
 
 
 def fuse_pages(
@@ -221,57 +240,63 @@ def fuse_pages(
     store=None,
     rrf_k: int = RRF_K,
 ) -> List[PageCandidate]:
-    """RRF fusion at PAGE level.
+    """RRF fusion at PAGE level — one contribution per retrieval METHOD.
 
-    Every text chunk contributes its full fused score (the sum of its
-    per-method RRF terms) to its page; every visual hit contributes one
-    ``1/(rrf_k + rank)`` term under the ``visual`` method. Pages are
-    ranked by the summed score (deterministic tie-break on doc_id+page).
-    Multiple chunks from one page keep their individual provenance in
-    ``text_chunks``.
+    page_score = SUM over methods m of  1 / (rrf_k + best_page_rank_in_m)
+
+    ``best_page_rank_in_m`` is the BEST (smallest) 1-based rank the page
+    achieved within method m across all its text chunks (plus the visual
+    rank when the visual index found the page). This deliberately avoids
+    page-length bias: a page with ten text chunks does NOT outrank a page
+    with one equally-relevant chunk, because each method counts once.
+    All contributing chunks are preserved verbatim in ``text_chunks`` for
+    provenance; ties break deterministically on (doc_id, page_no).
     """
-    pages: Dict[Tuple[str, int], dict] = {}
-
-    def page_key(cand):
-        return (cand.chunk.doc_id, cand.chunk.page_no)
+    pages: Dict[Tuple[str, int], _PageState] = {}
 
     for hit in fused:
-        key = page_key(hit)
-        st = pages.setdefault(key, {
-            "rrf": 0.0, "chunks": [], "methods": set(),
-            "visual": None,
-        })
-        st["rrf"] += hit.fused_score
-        st["chunks"].append(hit)
-        st["methods"].update(hit.methods)
+        key = (hit.chunk.doc_id, hit.chunk.page_no)
+        st = pages.setdefault(key, _PageState())
+        st.chunks.append(hit)
+        per_method = {ev.method: ev.rank for ev in hit.evidence}
+        if not per_method:  # defensive: no evidence entries -> rank by position
+            per_method = {m: hit.fused_rank for m in hit.methods}
+        for method, rank in per_method.items():
+            if method not in st.best_rank or rank < st.best_rank[method]:
+                st.best_rank[method] = rank
 
     for vc in visual:
         key = (vc.doc_id, vc.page)
-        st = pages.setdefault(key, {"rrf": 0.0, "chunks": [], "methods": set(),
-                                    "visual": None})
-        st["rrf"] += 1.0 / (rrf_k + vc.rank)
-        st["methods"].add("visual")
-        if st["visual"] is None or vc.distance < st["visual"].distance:
-            st["visual"] = vc
+        st = pages.setdefault(key, _PageState())
+        # one visual contribution per page; duplicates keep the best
+        if st.visual is None or vc.distance < st.visual.distance:
+            st.visual = vc
+        rank = st.visual.rank
+        if "visual" not in st.best_rank or rank < st.best_rank["visual"]:
+            st.best_rank["visual"] = rank
 
     ordered = sorted(
         pages.items(),
-        key=lambda kv: (-kv[1]["rrf"], kv[0]),
+        key=lambda kv: (
+            -sum(1.0 / (rrf_k + r) for r in kv[1].best_rank.values()),
+            kv[0],
+        ),
     )
     result: List[PageCandidate] = []
     for rank, ((doc_id, page), st) in enumerate(ordered, start=1):
         chunks: List[FusedHit] = sorted(
-            st["chunks"], key=lambda h: (-h.fused_score, h.chunk.chunk_id))
+            st.chunks, key=lambda h: (-h.fused_score, h.chunk.chunk_id))
         best = chunks[0] if chunks else None
-        vc: Optional[VisualCandidate] = st["visual"]
+        vc = st.visual
+        rrf = sum(1.0 / (rrf_k + r) for r in st.best_rank.values())
         warnings: List[str] = []
-        image_path, image_source = None, "none"
+        image_path, image_source, image_verified = None, "none", False
 
         # prefer the validated artifact image of the best text chunk
         if best is not None and best.chunk.image_path and store is not None:
             vpath, vnote = validate_artifact_image(best.chunk, store)
             if vpath is not None:
-                image_path, image_source = vpath, "artifact"
+                image_path, image_source, image_verified = vpath, "artifact", True
             elif vnote:
                 warnings.append(vnote)
         # fall back to the visual hit's image — re-vetted here so a
@@ -293,7 +318,8 @@ def fuse_pages(
                     )
                     vp, vn = validate_artifact_image(probe, store)
                     if vp is not None:
-                        image_path, image_source = vp, "visual_index"
+                        image_path = vp
+                        image_source, image_verified = "visual_index", True
                     else:
                         warnings.append(f"visual image rejected: {vn}")
                 elif _owned_by_another_document(raw, store, vc.doc_id):
@@ -301,12 +327,23 @@ def fuse_pages(
                         "visual image belongs to another document's "
                         "artifacts (rejected)")
                 else:
-                    image_path, image_source = str(raw), "visual_index"
+                    # exists + decodes, but NOT provably the original
+                    # page/slide image: candidate only, never a verified
+                    # citation (to_sources drops it).
+                    image_path = str(raw)
+                    image_source = "visual_index_external"
+                    image_verified = False
                     warnings.append(
-                        "visual image outside doc artifacts; claim accepted "
-                        "from visual index")
+                        "visual image outside doc artifacts: unverified "
+                        "source claim (candidate only, not a verified "
+                        "original page image)")
             else:
-                image_path, image_source = str(raw), "visual_index"
+                image_path = str(raw)
+                image_source = "visual_index_external"
+                image_verified = False
+                warnings.append(
+                    "visual image origin unverifiable without a store: "
+                    "candidate only")
 
         filename = best.chunk.filename if best else (vc.filename if vc else "")
         if not filename and store is not None:
@@ -321,10 +358,11 @@ def fuse_pages(
             warnings.append("page has neither text nor a usable image")
         result.append(PageCandidate(
             doc_id=doc_id, page_no=page, filename=filename,
-            page_rrf=st["rrf"], page_rank=rank,
-            methods=sorted(st["methods"]),
+            page_rrf=rrf, page_rank=rank,
+            methods=sorted(st.best_rank.keys()),
             text_chunks=chunks, best_chunk=best, visual=vc,
             image_path=image_path, image_source=image_source,
+            image_verified=image_verified,
             warnings=warnings,
         ))
     return result
@@ -356,3 +394,58 @@ def page_candidate_to_hit(pc: PageCandidate) -> FusedHit:
         methods=tuple(pc.methods),
         evidence=tuple(evidence),
     )
+
+
+# ---- production visual query embedding -----------------------------------
+
+
+class VisualQueryError(Exception):
+    """Visual query embedding unavailable (config or service problem)."""
+
+
+def unified_visual_text_embedder(session=None):
+    """PRODUCTION text-to-visual query embedder (str -> 2048-dim vector).
+
+    Live-verified (2026-10-16): port 9003's ``Qwen/Qwen3-VL-Embedding-2B``
+    embeds images AND text into ONE 2048-dim space, so the query must be
+    embedded by the SAME model — the 9002 Nemotron text bridge lives in a
+    different space (dimensionally equal, retrievals flat/unaligned) and
+    is NEVER used here.
+
+    Never fake; never port 9000; raises ``VisualQueryError`` when the
+    service is unconfigured. ``session`` is injectable for tests.
+    """
+    from app import config
+
+    config.validate_no_reserved_port(config.VISUAL_EMBED_BASE_URL)
+    if not config.VISUAL_EMBED_API_KEY:
+        raise VisualQueryError(
+            "visual query embedder not configured: set CLASS_API_KEY in .env"
+        )
+    base = config.VISUAL_EMBED_BASE_URL.rstrip("/")
+    model = config.VISUAL_EMBED_MODEL
+    headers = {
+        "Authorization": f"Bearer {config.VISUAL_EMBED_API_KEY}",
+        "Content-Type": "application/json",
+    }
+
+    def embed(text: str) -> List[float]:
+        import requests
+
+        transport = session if session is not None else requests
+        resp = transport.post(
+            f"{base}/embeddings",
+            headers=headers,
+            json={"model": model, "input": [str(text)]},
+            timeout=60,
+        )
+        if resp.status_code != 200:
+            raise VisualQueryError(
+                f"visual query embedder returned HTTP {resp.status_code}"
+            )
+        try:
+            return list(resp.json()["data"][0]["embedding"])
+        except (KeyError, IndexError, TypeError) as exc:
+            raise VisualQueryError(f"unusable visual-embedding response: {exc}") from exc
+
+    return embed

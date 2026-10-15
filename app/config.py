@@ -35,6 +35,10 @@ RERANK_BASE_URL = os.getenv("BASE_URL_RERANK", "http://dobolyi.com:9004/v1")
 RERANK_MODEL = os.getenv("RERANK_MODEL", "Qwen/Qwen3-VL-Reranker-2B")
 RERANK_API_KEY = os.getenv("CLASS_API_KEY_RERANK") or os.getenv("CLASS_API_KEY", "")
 
+VISUAL_EMBED_BASE_URL = os.getenv("BASE_URL_VISUAL_EMBED", "http://dobolyi.com:9003/v1")
+VISUAL_EMBED_MODEL = os.getenv("VISUAL_EMBED_MODEL", "Qwen/Qwen3-VL-Embedding-2B")
+VISUAL_EMBED_API_KEY = os.getenv("CLASS_API_KEY", "")
+
 APP_HOST = os.getenv("APP_HOST", "127.0.0.1")
 APP_PORT = int(os.getenv("APP_PORT", "7860"))
 

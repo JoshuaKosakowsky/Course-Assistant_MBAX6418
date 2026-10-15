@@ -290,6 +290,6 @@ def test_source_position_variants():
         image_path=None, chunk_id="c0", final_rank=1, rerank_score=None,
         fused_rank=1, fused_score=0.5, methods=("keyword",),
         evidence_ranks=(RankedEvidence("keyword", 1, 0.5),),
-        image_included=False, image_source="none")
+        image_included=False, image_source="none", image_verified=False)
     for ranked in ([fused], [rc], [item]):
         assert source_position(ranked, "a.pdf") == 1

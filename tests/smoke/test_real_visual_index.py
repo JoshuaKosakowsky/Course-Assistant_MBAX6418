@@ -1,34 +1,48 @@
 """Smoke test: MSpanny's REAL VisualIndex class (PR #11, unmerged) driven
-through a read-only worktree with INJECTED deterministic fake embedders.
+with INJECTED deterministic fake embedders — this is mechanics
+verification, NOT live model verification.
 
-Requires VISUAL_INDEX_SRC (default: the review worktree path) pointing at
-a checkout of origin/feat/visual-index. Skips cleanly when absent — this
-is mechanics verification against her real implementation, NOT live model
-verification (fake embeddings; port 9003 behavior lives in e2e tests).
-The test never imports her branch's app package into this process; it
-runs a small runner subprocess inside the worktree so package names never
-collide.
+Reproducibility (no developer paths):
+- VISUAL_INDEX_SRC env var -> run against that checkout (dev-time).
+- otherwise, if app.visual_index is importable from THIS repo (i.e. PR #11
+  has merged), run against the installed module directly.
+- otherwise SKIP with a clear reason (CI without the checkout).
+
+The test runs a subprocess in the target checkout so package names never
+collide with this repo's app package.
 """
 
+import importlib.util
 import json
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
-WORKTREE = os.environ.get(
-    "VISUAL_INDEX_SRC",
-    r"C:\Users\matty\Documents\review-wt-visual-index",
-)
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 pytestmark = pytest.mark.smoke
 
+
+def _target_checkout():
+    """Return the directory to run the real-VisualIndex runner in, or None."""
+    src = os.environ.get("VISUAL_INDEX_SRC")
+    if src and os.path.isdir(src) and os.path.isfile(
+            os.path.join(src, "app", "visual_index.py")):
+        return Path(src)
+    # PR #11 merged? then the module lives in this repo
+    if importlib.util.find_spec("app.visual_index") is not None:
+        return REPO_ROOT
+    return None
+
+
 requires_worktree = pytest.mark.skipif(
-    not os.path.isdir(WORKTREE) or not os.path.isfile(
-        os.path.join(WORKTREE, "app", "visual_index.py")),
-    reason="PR #11 read-only worktree checkout not present "
-           "(set VISUAL_INDEX_SRC)",
+    _target_checkout() is None,
+    reason="no PR #11 VisualIndex checkout available: set VISUAL_INDEX_SRC "
+           "to a feat/visual-index checkout (or merge PR #11); "
+           "unit tests cover the adapter with stubs regardless",
 )
 
 RUNNER = r"""
@@ -85,10 +99,12 @@ print(json.dumps({
 
 @requires_worktree
 def test_real_visual_index_class_with_fake_embeddings():
+    checkout = _target_checkout()
     result = subprocess.run(
         [sys.executable, "-c", RUNNER],
-        cwd=WORKTREE,
-        env={**os.environ, "PYTHONPATH": WORKTREE, "PYTHONIOENCODING": "utf-8"},
+        cwd=str(checkout),
+        env={**os.environ, "PYTHONPATH": str(checkout),
+             "PYTHONIOENCODING": "utf-8"},
         capture_output=True, text=True, timeout=180,
     )
     assert result.returncode == 0, result.stderr[-2000:]
