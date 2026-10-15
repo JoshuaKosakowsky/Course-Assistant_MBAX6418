@@ -31,6 +31,7 @@ import chromadb
 from chromadb.config import Settings
 
 from app.chunking import Chunk
+from app.embeddings import EmbeddingsError
 from app.keyword import Hit
 
 TEXT_COLLECTION = "course_text_chunks"
@@ -72,6 +73,19 @@ class TextVectorIndex:
             name=collection_name, metadata={"hnsw:space": "cosine"}
         )
         self._embedder = embedder  # any object exposing embed(list[str]) -> list[list[float]]
+        self.dimension: Optional[int] = self._stored_dimension()
+
+    def _stored_dimension(self) -> Optional[int]:
+        """Dimension the existing collection is locked to (ChromaDB fixes
+        the HNSW dimension at first insert), or None if empty."""
+        try:
+            peek = self._collection.peek(limit=1)
+        except Exception:  # pragma: no cover - defensive
+            return None
+        vectors = peek.get("embeddings")
+        if vectors is not None and len(vectors) > 0:  # numpy: no truthiness
+            return len(vectors[0])
+        return None
 
     # ---- introspection -------------------------------------------------
 
@@ -98,6 +112,16 @@ class TextVectorIndex:
             raise RuntimeError(
                 f"embedder returned {len(vectors)} vectors for "
                 f"{len(chunks)} chunks"
+            )
+        incoming_dim = len(vectors[0])
+        if self.dimension is None:
+            self.dimension = incoming_dim
+        elif incoming_dim != self.dimension:
+            raise EmbeddingsError(
+                f"dimension mismatch: this collection is locked to "
+                f"{self.dimension}D but the embedder produced "
+                f"{incoming_dim}D. Run `python -m app.indexing --reindex` "
+                f"(or clear the collection) before switching embedding models."
             )
         self._collection.upsert(
             ids=[c.chunk_id for c in chunks],

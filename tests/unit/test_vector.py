@@ -221,6 +221,26 @@ def test_second_index_uses_own_collection(tmp_path):
     assert "course_text_chunks" not in idx.collection_names()
 
 
+# 14. dimension guard (ChromaDB locks dim at first insert) ------------------
+
+def test_dimension_mismatch_raises_with_remediation(tmp_path):
+    class _Dim7:
+        def embed(self, texts):
+            return [[0.0] * 7 for _ in texts]
+
+    path = str(tmp_path / "db")
+    a = TextVectorIndex(FakeEmbedder(), persist_dir=path)
+    a.add(doc_chunks(DOC_FIN, "finance.pdf", FIN_TEXT))
+    assert a.dimension == 64
+
+    b = TextVectorIndex(_Dim7(), persist_dir=path)
+    assert b.dimension == 64
+    with pytest.raises(Exception, match="dimension mismatch"):
+        b.add(doc_chunks(DOC_MKT, "marketing.pdf", MKT_TEXT))
+    # the failed add left the collection untouched
+    assert TextVectorIndex(FakeEmbedder(), persist_dir=path).count == a.count
+
+
 # 13. configurable top-k ---------------------------------------------------
 
 def test_top_k(index):
