@@ -7,9 +7,12 @@ course materials (slides, syllabus, and other files downloaded from Canvas).
 Built on hybrid RAG: keyword search + text embeddings + visual embeddings,
 with source-grounded evidence — including original page/slide images.
 
-**Status:** Phase 0 — repo & collaboration scaffold. No end-to-end pipeline yet.
-Work breakdown, ownership, and completion checks live in
-[PLAN.md](PLAN.md) and the GitHub issues.
+**Status:** Phase 1 — document management and PDF ingestion implemented.
+The ingestion CLI can add and parse PDFs. PPTX conversion is implemented but
+remains unverified without a `.pptx` sample and LibreOffice. The remaining
+pipeline (indexing, retrieval, Q&A, and quizzes) is not implemented yet. Work
+breakdown, ownership, and completion checks live in [PLAN.md](PLAN.md) and the
+GitHub issues.
 
 ---
 
@@ -48,8 +51,14 @@ python -m venv .venv
 pip install -r requirements.txt
 cp .env.example .env     # then fill in real values
 pytest                   # unit + smoke (offline)
+python -m app.ingest path/to/material.pdf  # add + parse a PDF
 python -m app.ui         # launch the Gradio management UI
 ```
+
+**Sample corpus:** A syllabus and five lecture slide PDFs are kept locally
+under `data/incoming/` (gitignored). They have been parsed and checked: 152
+pages yielded text and rendered page images; first-page renders were visually
+spot-checked. Course materials are not committed to this public repository.
 
 ### Class services
 
