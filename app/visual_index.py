@@ -84,7 +84,15 @@ class VisualIndex:
         self._collection.upsert(
             ids=[vid],
             embeddings=[embedding],
-            metadatas=[{"doc_id": doc_id, "page": int(page), "image_path": str(image_path)}],
+            metadatas=[
+                {
+                    "doc_id": doc_id,
+                    "page": int(page),
+                    # POSIX form keeps metadata portable across OSes; Path()
+                    # re-parses forward slashes correctly on Windows too.
+                    "image_path": image_path.as_posix(),
+                }
+            ],
         )
         logger.info("Indexed %s (page %s) as %s", image_path, page, vid)
         return vid

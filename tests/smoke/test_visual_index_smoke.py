@@ -6,6 +6,7 @@ holds. No network, no keys.
 """
 
 import pytest
+from pathlib import Path
 from PIL import Image
 
 from app.visual_index import VisualIndex
@@ -27,7 +28,10 @@ def test_index_fixture_and_query_by_image(tmp_path):
     hit = hits[0]
     assert hit.doc_id == "fixture-doc"
     assert hit.page == 1
-    assert hit.image_path == slide
+    # Compare normalized Path values: Chroma returns OS-native separators
+    # (Windows backslashes) while the fixture path was written with
+    # forward slashes.
+    assert Path(hit.image_path) == Path(slide)
     assert hit.distance < 1e-6
 
 
