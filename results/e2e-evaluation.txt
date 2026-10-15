@@ -1,0 +1,97 @@
+============================================================================================
+END-TO-END EVALUATION — Issue #4 Step 3 (6 questions, live 9002 + 9004)
+Corpus: 3 synthetic 3-page PDFs; page 3 of each is a rendered chart page.
+Expectations set BEFORE running. Synthetic materials only (disclosed).
+============================================================================================
+Indexed 3 docs, 9 keyword chunks, 9 vector chunks
+
+Q: 'What is free cash flow?'
+   expected: finance.pdf p1
+   BM25 top3:    [('finance.pdf', 1), ('finance.pdf', 3), ('operations.pdf', 2)]
+   vector top3:  [('finance.pdf', 1, 0.735), ('marketing.pdf', 1, 0.657), ('marketing.pdf', 2, 0.654)]
+   fused top (pre-rerank): [('finance.pdf', 1, 0.033, ['keyword', 'vector']), ('finance.pdf', 3, 0.032, ['keyword', 'vector']), ('finance.pdf', 2, 0.031, ['keyword', 'vector']), ('operations.pdf', 2, 0.031, ['keyword', 'vector']), ('marketing.pdf', 1, 0.016, ['vector'])]
+   reranked text-only:     [('finance.pdf', 1, 0.696, False), ('finance.pdf', 3, 0.372, False), ('finance.pdf', 2, 0.301, False)]
+   reranked image-aware:   [('finance.pdf', 1, 0.739, True), ('finance.pdf', 3, 0.467, True), ('finance.pdf', 2, 0.304, True)]
+   stages: {'keyword': 'ok', 'semantic': 'ok', 'fusion': 'ok', 'rerank': 'ok', 'visual': 'skipped'}
+      evidence #1: finance.pdf p1 img=True (artifact)
+      evidence #2: finance.pdf p3 img=True (artifact)
+      evidence #3: finance.pdf p2 img=True (artifact)
+   positions: fused#1 -> text#1 -> image#1  (unchanged)
+
+Q: 'How much is a company really worth?'
+   expected: finance.pdf p2
+   BM25 top3:    [('marketing.pdf', 1), ('finance.pdf', 2)]
+   vector top3:  [('marketing.pdf', 2, 0.691), ('operations.pdf', 3, 0.683), ('marketing.pdf', 1, 0.673)]
+   fused top (pre-rerank): [('marketing.pdf', 1, 0.032, ['keyword', 'vector']), ('finance.pdf', 2, 0.031, ['keyword', 'vector']), ('marketing.pdf', 2, 0.016, ['vector']), ('operations.pdf', 3, 0.016, ['vector']), ('finance.pdf', 1, 0.016, ['vector'])]
+   reranked text-only:     [('finance.pdf', 2, 0.617, False), ('finance.pdf', 1, 0.411, False), ('finance.pdf', 3, 0.342, False)]
+   reranked image-aware:   [('finance.pdf', 2, 0.608, True), ('finance.pdf', 1, 0.354, True), ('marketing.pdf', 3, 0.293, True)]
+   stages: {'keyword': 'ok', 'semantic': 'ok', 'fusion': 'ok', 'rerank': 'ok', 'visual': 'skipped'}
+      evidence #1: finance.pdf p2 img=True (artifact)
+      evidence #2: finance.pdf p1 img=True (artifact)
+      evidence #3: marketing.pdf p3 img=True (artifact)
+   positions: fused#2 -> text#1 -> image#1  (improved)
+
+Q: 'Which page shows the free cash flow chart?'
+   expected: finance.pdf p3
+   BM25 top3:    [('finance.pdf', 1), ('finance.pdf', 3), ('operations.pdf', 2)]
+   vector top3:  [('marketing.pdf', 1, 0.732), ('marketing.pdf', 2, 0.725), ('finance.pdf', 1, 0.705)]
+   fused top (pre-rerank): [('finance.pdf', 1, 0.032, ['keyword', 'vector']), ('finance.pdf', 3, 0.032, ['keyword', 'vector']), ('operations.pdf', 2, 0.031, ['keyword', 'vector']), ('finance.pdf', 2, 0.031, ['keyword', 'vector']), ('marketing.pdf', 1, 0.016, ['vector'])]
+   reranked text-only:     [('finance.pdf', 3, 0.555, False), ('finance.pdf', 1, 0.409, False), ('finance.pdf', 2, 0.331, False)]
+   reranked image-aware:   [('finance.pdf', 1, 0.582, True), ('finance.pdf', 3, 0.523, True), ('finance.pdf', 2, 0.327, True)]
+   stages: {'keyword': 'ok', 'semantic': 'ok', 'fusion': 'ok', 'rerank': 'ok', 'visual': 'skipped'}
+      evidence #1: finance.pdf p1 img=True (artifact)
+      evidence #2: finance.pdf p3 img=True (artifact)
+      evidence #3: finance.pdf p2 img=True (artifact)
+   positions: fused#2 -> text#1 -> image#2  (unchanged)
+
+Q: 'How do companies group customers for marketing?'
+   expected: marketing.pdf p2
+   BM25 top3:    [('marketing.pdf', 1)]
+   vector top3:  [('marketing.pdf', 1, 0.726), ('marketing.pdf', 2, 0.72), ('operations.pdf', 3, 0.697)]
+   fused top (pre-rerank): [('marketing.pdf', 1, 0.033, ['keyword', 'vector']), ('marketing.pdf', 2, 0.016, ['vector']), ('operations.pdf', 3, 0.016, ['vector']), ('operations.pdf', 1, 0.016, ['vector']), ('marketing.pdf', 3, 0.015, ['vector'])]
+   reranked text-only:     [('marketing.pdf', 2, 0.697, False), ('marketing.pdf', 1, 0.333, False), ('marketing.pdf', 3, 0.316, False)]
+   reranked image-aware:   [('marketing.pdf', 2, 0.718, True), ('marketing.pdf', 1, 0.287, True), ('marketing.pdf', 3, 0.274, True)]
+   stages: {'keyword': 'ok', 'semantic': 'ok', 'fusion': 'ok', 'rerank': 'ok', 'visual': 'skipped'}
+      evidence #1: marketing.pdf p2 img=True (artifact)
+      evidence #2: marketing.pdf p1 img=True (artifact)
+      evidence #3: marketing.pdf p3 img=True (artifact)
+   positions: fused#2 -> text#1 -> image#1  (improved)
+
+Q: 'What should a firm do when inventory runs low?'
+   expected: operations.pdf p1
+   BM25 top3:    [('operations.pdf', 1), ('operations.pdf', 3)]
+   vector top3:  [('operations.pdf', 3, 0.775), ('marketing.pdf', 1, 0.768), ('marketing.pdf', 2, 0.752)]
+   fused top (pre-rerank): [('operations.pdf', 3, 0.033, ['keyword', 'vector']), ('operations.pdf', 1, 0.032, ['keyword', 'vector']), ('marketing.pdf', 1, 0.016, ['vector']), ('marketing.pdf', 2, 0.016, ['vector']), ('marketing.pdf', 3, 0.016, ['vector'])]
+   reranked text-only:     [('operations.pdf', 1, 0.504, False), ('operations.pdf', 3, 0.404, False), ('operations.pdf', 2, 0.322, False)]
+   reranked image-aware:   [('operations.pdf', 1, 0.476, True), ('operations.pdf', 3, 0.458, True), ('operations.pdf', 2, 0.322, True)]
+   stages: {'keyword': 'ok', 'semantic': 'ok', 'fusion': 'ok', 'rerank': 'ok', 'visual': 'skipped'}
+      evidence #1: operations.pdf p1 img=True (artifact)
+      evidence #2: operations.pdf p3 img=True (artifact)
+      evidence #3: operations.pdf p2 img=True (artifact)
+   positions: fused#2 -> text#1 -> image#1  (improved)
+
+Q: 'What is the capital of France?'
+   expected: NONE (out of scope)
+   BM25 top3:    [('finance.pdf', 1)]
+   vector top3:  [('operations.pdf', 3, 0.724), ('marketing.pdf', 2, 0.722), ('marketing.pdf', 1, 0.713)]
+   fused top (pre-rerank): [('finance.pdf', 1, 0.032, ['keyword', 'vector']), ('operations.pdf', 3, 0.016, ['vector']), ('marketing.pdf', 2, 0.016, ['vector']), ('marketing.pdf', 1, 0.016, ['vector']), ('marketing.pdf', 3, 0.016, ['vector'])]
+   reranked text-only:     [('marketing.pdf', 3, 0.151, False), ('finance.pdf', 1, 0.139, False), ('operations.pdf', 3, 0.124, False)]
+   reranked image-aware:   [('operations.pdf', 2, 0.21, True), ('finance.pdf', 1, 0.19, True), ('marketing.pdf', 3, 0.188, True)]
+   stages: {'keyword': 'ok', 'semantic': 'ok', 'fusion': 'ok', 'rerank': 'ok', 'visual': 'skipped'}
+      evidence #1: operations.pdf p2 img=True (artifact)
+      evidence #2: finance.pdf p1 img=True (artifact)
+      evidence #3: marketing.pdf p3 img=True (artifact)
+   retrieved 3 junk items for out-of-scope Q (no expected source)
+
+============================================================================================
+SUMMARY (top-1 accuracy and recall@3, fused vs text-rerank vs image-rerank)
+============================================================================================
+question                                              fused           text          image  verdict
+What is free cash flow?                      t1=True r3=True t1=True r3=True t1=True r3=True  unchanged
+How much is a company really worth?          t1=False r3=True t1=True r3=True t1=True r3=True  improved
+Which page shows the free cash flow chart?   t1=False r3=True t1=True r3=True t1=False r3=True  unchanged
+How do companies group customers for marke   t1=False r3=True t1=True r3=True t1=True r3=True  improved
+What should a firm do when inventory runs    t1=False r3=True t1=True r3=True t1=True r3=True  improved
+top-1 accuracy (fused / text / image): 1/5 / 5/5 / 4/5
+recall@3      (fused / text / image): 5/5 / 5/5 / 5/5
+per-question verdicts: improved=3 worsened=0 unchanged=2
