@@ -1,0 +1,30 @@
+==============================================================================
+ISSUE #4 STEP 3 EVALUATION — RECONCILED STATISTICS (computed from
+results/e2e-evaluation.txt; five answerable questions; out-of-scope Q6
+reported separately and never scored)
+==============================================================================
+
+question                                      fused   text  image
+What is free cash flow?                          #1     #1     #1
+How much is a company really worth?              #2     #1     #1
+Which page shows the free cash flow chart?       #2     #1     #2
+How do companies group customers for marke       #2     #1     #1
+What should a firm do when inventory runs        #2     #1     #1
+
+COMPARISON COUNTS (improved / unchanged / worsened)
+  fusion -> text-only rerank : (4, 1, 0)
+  fusion -> image-aware rerank: (3, 2, 0)
+  text-only -> image-aware    : (0, 4, 1)
+
+RECONCILIATION with aggregate top-1 accuracy (5 answerable questions):
+  fused top-1: 1/5   (correct answers NOT improved need: 4)
+  text  top-1: 5/5   -> fusion->text improved counts match the 4 fixes
+  image top-1: 4/5   -> fusion->image improved=3 (1 already correct + 3 fixes = 4)
+  text vs image: image worsened 1 -> 5 - 1 = 4/5  (matches)
+
+CORRECTION to the Step-3 report: '3 questions improved' referred ONLY to the
+fusion -> image-aware comparison. The fusion -> text-only comparison shows
+4 improved / 1 unchanged / 0 worsened, and text-only -> image-aware shows
+0 improved / 4 unchanged / 1 worsened (the chart question). None of the
+observed scores or ground-truth labels were changed; counts are recomputed
+from the recorded per-question positions.

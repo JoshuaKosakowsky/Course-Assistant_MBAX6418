@@ -22,10 +22,40 @@ from app.evidence import (
     EvidenceItem,
     EvidencePack,
     item_from_fused,
+    item_from_page_candidate,
     item_from_visual,
+    validate_artifact_image,
 )
 from app.fusion import FusedHit, FusionEngine
 from app.rerank import RerankClient, RerankOutcome, rerank_fused
+from app.visual_retrieval import (
+    VisualSourceAdapter,
+    fuse_pages,
+    page_candidate_to_hit,
+)
+
+
+def _page_image_validator():
+    """Ownership validator for PAGE-level candidates: the image was vetted
+    at fusion time (artifact-authoritative or visual-index claim); here we
+    only re-guard existence/decoding before the reranker request."""
+
+    def validator(chunk) -> tuple:
+        from pathlib import Path
+
+        raw = chunk.image_path
+        if not raw:
+            return None, "no image path"
+        p = Path(raw)
+        if not p.is_file():
+            return None, "image file no longer exists"
+        from app.evidence import _mime_type
+
+        if _mime_type(p) is None:
+            return None, "unreadable/corrupt image"
+        return str(p), ""
+
+    return validator
 
 
 @dataclass
@@ -54,6 +84,8 @@ def retrieve(
     doc_ids: Optional[Sequence[str]] = None,
     include_images: bool = True,
     visual_source=None,
+    visual_k: int = 5,
+    text_to_visual_embedder=None,
     max_images: int = 10,
 ) -> RetrievalOutcome:
     """Run the full text pipeline for one question and build its evidence.
@@ -61,17 +93,23 @@ def retrieve(
     ``keyword``/``vector`` are SearchSource objects (KeywordIndex /
     TextVectorIndex instances — the FusionEngine protocol). ``store`` is
     a DocumentStore used for manifest-authoritative image validation.
-    ``visual_source`` is an OPTIONAL dependency-injected adapter exposing
-    ``query_text(text, k=...) -> [VisualHit-like]`` (PR #11's interface);
-    its results are reported as visual_items (image_source="visual_index")
-    but NOT merged into the text ranking — visual fusion is a later step
-    awaiting PR #11 + port 9003.
+
+    ``visual_source`` is an OPTIONAL adapter source exposing the PR #11
+    VisualIndex protocol (``query_text(query, k)`` / ``query_embedding``).
+    When provided and running, visual candidates are FUSED at page level
+    (rank-based RRF on ``(doc_id, page)``) and the reranker/evidence run
+    over pages — the visual results genuinely participate in ranking.
+    ``text_to_visual_embedder`` (callable str -> vector) enables the
+    verified unified-space bridge: the query is embedded by the SAME
+    visual model (port 9003) and searched via ``query_embedding``.
+    If visual retrieval fails or is absent, the pipeline degrades to the
+    text-only chunk path unchanged.
     """
     outcome = RetrievalOutcome(query=query)
     text = (query or "").strip()
     if not text:
         outcome.stages = {s: "skipped" for s in
-                          ("keyword", "semantic", "fusion", "rerank")}
+                          ("keyword", "semantic", "fusion", "rerank", "visual")}
         outcome.evidence = EvidencePack(
             query=query, stages=dict(outcome.stages),
             warnings=["empty query"],
@@ -108,13 +146,57 @@ def retrieve(
         for d in engine.degraded:
             outcome.warnings.append(f"retrieval degraded: {d}")
 
-    # 4. multimodal reranking (class endpoint; failure -> fused fallback)
+    # 5. visual-index retrieval — FUSED at page level, not a side list
+    visual_candidates = []
+    pages: Optional[list] = None
+    outcome.stages["visual"] = "skipped"
+    if visual_source is not None and outcome.fused:
+        try:
+            adapter = VisualSourceAdapter(visual_source, store=store)
+            if text_to_visual_embedder is not None:
+                # verified unified-space bridge (9003 Qwen3-VL: images and
+                # text live in one 2048-dim space) — embed the query with
+                # the visual model itself, then query by embedding
+                visual_candidates = adapter.query_embedding(
+                    text_to_visual_embedder(text), k=visual_k, doc_ids=doc_ids)
+            else:
+                visual_candidates = adapter.query_text(
+                    text, k=visual_k, doc_ids=doc_ids)
+            outcome.stages["visual"] = "ok"
+            outcome.visual_items = [
+                item_from_visual(vc, i, store=store)
+                for i, vc in enumerate(visual_candidates, start=1)
+            ]
+            pages = fuse_pages(outcome.fused, visual_candidates, store=store)
+        except Exception as exc:
+            outcome.stages["visual"] = "degraded"
+            outcome.warnings.append(f"visual retrieval failed: {exc}")
+
+    page_hits = None
+    hit_to_page = {}
+    if pages is not None:
+        page_hits = [page_candidate_to_hit(pc) for pc in pages]
+        hit_to_page = {h.chunk.chunk_id: pc for h, pc in zip(page_hits, pages)}
+
+    # 4. multimodal reranking (class endpoint; failure -> fused fallback).
+    # Images are ownership-validated BEFORE any request is encoded: page
+    # candidates use the image vetted at fusion time; chunk candidates use
+    # the manifest-authoritative artifact validation.
     outcome.stages["rerank"] = "skipped"
-    if reranker is not None and outcome.fused:
+    rank_inputs = page_hits if page_hits is not None else outcome.fused
+    if reranker is not None and rank_inputs:
+        if page_hits is not None:
+            validate_image = _page_image_validator()
+        else:
+            validate_image = (
+                (lambda c: validate_artifact_image(c, store))
+                if store is not None else None
+            )
         try:
             outcome.rerank = rerank_fused(
-                text, outcome.fused, reranker, top_k=top_k,
+                text, rank_inputs, reranker, top_k=top_k,
                 include_images=include_images, max_images=max_images,
+                validate_image=validate_image,
             )
             outcome.stages["rerank"] = (
                 "ok" if outcome.rerank.applied else "degraded"
@@ -125,38 +207,34 @@ def retrieve(
             outcome.stages["rerank"] = "degraded"
             outcome.warnings.append(f"reranking failed: {exc}")
 
-    # 5. evidence pack from the best ranking available
-    if outcome.rerank is not None and outcome.rerank.applied:
-        ranked = outcome.rerank.ranked
-        build = lambda c, rank: item_from_fused(
-            c.original, final_rank=rank,
-            rerank_score=c.rerank_score,
-            image_included=c.image_included, store=store,
-        )
+    # 6. evidence pack from the best ranking available
+    items = []
+    if page_hits is not None:
+        if outcome.rerank is not None and outcome.rerank.applied:
+            for rank, c in enumerate(outcome.rerank.ranked, start=1):
+                pc = hit_to_page.get(c.original.chunk.chunk_id)
+                if pc is None:  # pragma: no cover - defensive
+                    continue
+                items.append(item_from_page_candidate(
+                    pc, rank, c.rerank_score, c.image_included, store))
+        else:
+            for rank, pc in enumerate(pages, start=1):
+                items.append(item_from_page_candidate(
+                    pc, rank, None, False, store))
+    elif outcome.rerank is not None and outcome.rerank.applied:
+        for rank, c in enumerate(outcome.rerank.ranked, start=1):
+            items.append(item_from_fused(
+                c.original, final_rank=rank, rerank_score=c.rerank_score,
+                image_included=c.image_included, store=store))
     else:
-        ranked = outcome.fused
-        build = lambda h, rank: item_from_fused(
-            h, final_rank=rank, rerank_score=None,
-            image_included=False, store=store,
-        )
-    items = [build(c, i) for i, c in enumerate(ranked, start=1)] if ranked else []
+        for rank, h in enumerate(outcome.fused, start=1):
+            items.append(item_from_fused(
+                h, final_rank=rank, rerank_score=None,
+                image_included=False, store=store))
+
     outcome.evidence = EvidencePack(
         query=text, items=items, stages=dict(outcome.stages),
         warnings=list(outcome.warnings),
     )
-
-    # 6. optional visual-index retrieval (reported separately, not fused)
-    outcome.stages["visual"] = "skipped"
-    if visual_source is not None:
-        try:
-            vhits = visual_source.query_text(text, k=top_k)
-            outcome.stages["visual"] = "ok"
-            outcome.visual_items = [
-                item_from_visual(vh, i, store=store)
-                for i, vh in enumerate(vhits, start=1)
-            ]
-        except Exception as exc:
-            outcome.stages["visual"] = "degraded"
-            outcome.warnings.append(f"visual retrieval failed: {exc}")
 
     return outcome

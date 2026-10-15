@@ -251,6 +251,56 @@ def item_from_visual(
     )
 
 
+def item_from_page_candidate(
+    pc,
+    final_rank: int,
+    rerank_score: Optional[float],
+    image_included: bool,
+    store=None,
+) -> EvidenceItem:
+    """Evidence item from a fused PAGE (text chunks + optional visual hit).
+
+    The excerpt is the best text chunk's (None on visual-only pages, with
+    an explicit warning — never invented); the image is the vetted page
+    image (artifact first, then visual-index); chunk_id stays stable and
+    provenance keeps every original method/rank/score."""
+    warnings = list(pc.warnings)
+    excerpt = None
+    if pc.best_chunk is not None and pc.best_chunk.chunk.text.strip():
+        excerpt = pc.best_chunk.chunk.text
+    else:
+        warnings.append("page has no extractable text (visual-only page)")
+    if pc.visual is not None and pc.image_source == "visual_index":
+        for w in pc.visual.warnings:
+            if w not in warnings:
+                warnings.append(w)
+    evidence_ranks = tuple(pc.best_chunk.evidence) if pc.best_chunk else ()
+    if pc.visual is not None:
+        # preserve the visual method's own rank + distance in provenance
+        evidence_ranks = evidence_ranks + (
+            RankedEvidence(method="visual", rank=pc.visual.rank,
+                           score=-pc.visual.distance),
+        )
+    return EvidenceItem(
+        doc_id=pc.doc_id,
+        filename=pc.filename,
+        page_no=pc.page_no,
+        excerpt=excerpt,
+        image_path=pc.image_path,
+        chunk_id=(pc.best_chunk.chunk.chunk_id if pc.best_chunk
+                  else f"vis:{pc.doc_id}:{pc.page_no:03d}"),
+        final_rank=final_rank,
+        rerank_score=rerank_score,
+        fused_rank=pc.page_rank,
+        fused_score=pc.page_rrf,
+        methods=tuple(pc.methods),
+        evidence_ranks=evidence_ranks,
+        image_included=image_included,
+        image_source=pc.image_source,
+        warnings=tuple(warnings),
+    )
+
+
 # ---- evaluation helpers -----------------------------------------------------
 
 

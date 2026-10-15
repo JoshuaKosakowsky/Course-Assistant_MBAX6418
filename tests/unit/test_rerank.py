@@ -436,3 +436,35 @@ def test_port_9000_rejected():
     with pytest.raises(ValueError, match="9000"):
         RerankClient(base_url="http://dobolyi.com:9000/v1", model="m",
                      api_key="k")
+
+
+# 21. ownership validation happens BEFORE the reranker request ---------------------------
+
+def test_wrong_document_image_never_reaches_payload(tmp_path):
+    """REGRESSION (Issue #4 Step 4): a matching page-001.png filename from
+    the WRONG document must be excluded BEFORE the request is encoded —
+    the actual payload must be text-only for that candidate."""
+    # candidate chunk claims doc-a page 1 but its image lives in doc-b's dir
+    foreign = tmp_path / "doc-b" / "pages" / "page-001.png"
+    foreign.parent.mkdir(parents=True)
+    make_png(foreign, "other document's page 1")
+    chunk = mk_chunk("c0", doc_id="doc-a", page_no=1,
+                     image_path=str(foreign))
+    fused = mk_fused(chunk, mk_chunk("c1", doc_id="doc-a", page_no=1))
+
+    def strict_validator(c):
+        # manifest-authoritative equivalent: doc-b image cannot belong to doc-a
+        if "doc-b" in c.image_path:
+            return None, "wrong-document image rejected"
+        return c.image_path, ""
+
+    transport = FakeTransport(body_fn=lambda req: results_for({0: 0.9, 1: 0.8}))
+    outcome = rerank_fused("q", fused, make_client(transport),
+                           include_images=True, validate_image=strict_validator)
+    docs = transport.calls[0]["json"]["documents"]
+    assert isinstance(docs[0], str), "wrong-document image must not be sent"
+    assert "image_url" not in str(docs[0])
+    assert "wrong-document" in outcome.ranked[0].note
+    assert outcome.ranked[0].image_included is False
+    # the OWned candidate (c1, no image path) also stays text-only but harmless
+    assert isinstance(docs[1], str)

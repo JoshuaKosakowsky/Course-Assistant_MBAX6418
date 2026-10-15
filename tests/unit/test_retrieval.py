@@ -352,27 +352,59 @@ def test_retrieval_metrics_offline(tmp_path):
     assert m["top1"] is True or m["position"] in (1, 2, 3)
 
 
-# 18. retrieved-visual vs attached-artifact distinction -----------------------------
+# 18. retrieved-visual candidates are FUSED at page level -----------------------
 
-def test_visual_items_kept_separate(tmp_path):
-    store, kw, vec = make_env(tmp_path)
+def test_visual_candidates_fused_at_page_level(tmp_path):
+    """Step-4 semantics: when the visual source succeeds, its candidates
+    genuinely participate in ranking (page-level RRF) instead of being
+    kept in a separate list."""
+    store = DocumentStore(root=tmp_path / "data")
+    src = tmp_path / "a.pdf"
+    d = pymupdf.open(); pg = d.new_page()
+    pg.insert_text((72, 72), "Free cash flow equals operating cash flow minus capex.")
+    d.save(str(src)); d.close()
+    rec = store.add(src)  # real record; content-addressed id
+    kw = KeywordIndex()
+    vec = TextVectorIndex(FakeEmbedder(), persist_dir=tmp_path / "db")
+    chunks = chunk_pages(rec.doc_id, "a.pdf",
+                         [PageText(page_no=1, text=FIN)],
+                         chunk_size=80, chunk_overlap=10, format=".pdf")
+    kw.add(chunks); vec.add(chunks)
+
     img = tmp_path / "vis.png"
-    d = pymupdf.open(); pg = d.new_page(); pg.insert_text((72, 72), "chart")
+    d = pymupdf.open(); pg = d.new_page(); pg.insert_text((72, 72), "cash flow chart")
     pg.get_pixmap(dpi=72).save(str(img)); d.close()
 
     class FakeVisualSource:
         def query_text(self, text, k=5):
-            return [type("VH", (), {"doc_id": "doc-9", "page": 3,
-                                    "image_path": str(img), "id": "v1"})()]
+            return [type("VH", (), {"doc_id": rec.doc_id, "page": 1,
+                                    "image_path": str(img), "id": "v1",
+                                    "distance": 0.1})()]
 
     outcome = retrieve("free cash flow", keyword=kw, vector=vec,
                        reranker=StubReranker(), store=store,
                        visual_source=FakeVisualSource(), top_k=3)
     assert outcome.stages["visual"] == "ok"
-    assert len(outcome.visual_items) == 1
-    vi = outcome.visual_items[0]
-    assert vi.image_source == "visual_index"
-    assert vi.image_path == str(img)
-    assert vi.excerpt is None  # never invented
-    # the text evidence items are NOT visual-index items
-    assert all(i.image_source != "visual_index" for i in outcome.evidence.items)
+    assert outcome.visual_items[0].image_source == "visual_index"
+    # the page-1 evidence carries the visual method AND the page image
+    top = outcome.evidence.items[0]
+    assert top.filename == "a.pdf" and top.page_no == 1
+    assert "visual" in top.methods
+    assert top.image_path is not None  # visual image became the page image
+    assert top.image_source == "visual_index"
+    assert any(e.method == "visual" for e in top.evidence_ranks)
+
+
+def test_visual_failure_degrades_to_text_only(tmp_path):
+    store, kw, vec = make_env(tmp_path)
+
+    class BrokenVisual:
+        def query_text(self, text, k=5):
+            raise RuntimeError("visual service down")
+
+    outcome = retrieve("free cash flow", keyword=kw, vector=vec,
+                       reranker=StubReranker(), store=store,
+                       visual_source=BrokenVisual(), top_k=3)
+    assert outcome.stages["visual"] == "degraded"
+    assert outcome.evidence.items  # text evidence survives
+    assert any("visual" in w for w in outcome.warnings)

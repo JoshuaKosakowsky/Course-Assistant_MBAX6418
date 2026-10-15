@@ -69,15 +69,22 @@ def encode_document(
     include_image: bool = True,
     max_chars: int = 2000,
     max_image_kb: int = 4000,
+    validate_image=None,
 ) -> Tuple[object, bool, str]:
     """Encode one fused candidate for the reranker.
 
     Returns ``(payload, image_included, note)`` where ``payload`` is a
     plain text string when no usable image is present, or the verified
-    multimodal content object when an image is attached. A candidate is
-    NEVER silently paired with an image from another document/page: the
-    image path must exist and its basename must match this candidate's
-    document id + page number (the parser writes ``page-{page_no:03d}.png``).
+    multimodal content object when an image is attached.
+
+    ``validate_image`` (optional) is a callable ``(chunk) -> (path, note)``
+    that performs AUTHORITATIVE ownership validation (artifact directory +
+    manifest) BEFORE any payload is built — a matching ``page-001.png``
+    filename alone never proves the image belongs to the candidate's
+    document/page. When it returns ``(None, note)`` the image is excluded
+    and the note recorded; when it returns a path, that validated path is
+    used. Without the hook, a lightweight existence/decodability check is
+    applied (used only for pre-vetted page-level candidates).
     """
     text = hit.chunk.text or ""
     note = ""
@@ -87,11 +94,21 @@ def encode_document(
     if not include_image:
         return text, False, note
 
-    path = Path(hit.chunk.image_path) if hit.chunk.image_path else None
-    if path is None:
-        return text, False, note + ("; " if note else "") + "no image path"
+    if validate_image is not None:
+        vpath, vnote = validate_image(hit.chunk)
+        if vpath is None:
+            return text, False, note + ("; " if note else "") + vnote
+        path = Path(vpath)
+    else:
+        path = Path(hit.chunk.image_path) if hit.chunk.image_path else None
+        if path is None:
+            return text, False, note + ("; " if note else "") + "no image path"
 
-    img_note = _image_note(path, hit, max_image_kb)
+    # When an authoritative validator ran, OWNERSHIP is its job and the
+    # parser's page-NNN name convention does not apply (page-level
+    # candidates may carry vetted images with arbitrary names).
+    img_note = _image_note(path, hit, max_image_kb,
+                           enforce_page_name=validate_image is None)
     if img_note:
         return text, False, note + ("; " if note else "") + img_note
 
@@ -109,16 +126,17 @@ def encode_document(
     }
     return payload, True, note
 
-
-def _image_note(path: Optional[Path], hit: FusedHit, max_image_kb: int) -> str:
+def _image_note(path: Optional[Path], hit: FusedHit, max_image_kb: int,
+                enforce_page_name: bool = True) -> str:
     """Return why an image cannot be used, or '' if it can."""
     if path is None or not path.exists():
         return "image missing"
-    expected = f"page-{hit.chunk.page_no:03d}.png"
-    if path.name != expected:
-        # safety: refuse to attach an image that does not correspond to
-        # this candidate's document/page
-        return f"image name {path.name!r} != expected {expected!r}"
+    if enforce_page_name:
+        expected = f"page-{hit.chunk.page_no:03d}.png"
+        if path.name != expected:
+            # safety: refuse to attach an image that does not correspond
+            # to this candidate's document/page
+            return f"image name {path.name!r} != expected {expected!r}"
     try:
         size_kb = path.stat().st_size / 1024
     except OSError:
@@ -320,6 +338,7 @@ def rerank_fused(
     max_chars: int = 2000,
     max_image_kb: int = 4000,
     max_images: int = 10,
+    validate_image=None,
 ) -> RerankOutcome:
     """Rerank fused candidates with the class reranker.
 
@@ -328,7 +347,9 @@ def rerank_fused(
     - One HTTP request per query (plus no calls when there is nothing to
       rank or reranking is disabled).
     - Images are attached per candidate up to ``max_images``; each must
-      pass ``encode_document``'s existence/page/decodability/size checks.
+      pass ``encode_document``'s validation — including the optional
+      ``validate_image`` ownership hook, so a wrong-document image can
+      never reach the reranker request (regression-tested).
     """
     hits = list(fused_hits)
     if not hits:
@@ -344,6 +365,7 @@ def rerank_fused(
         payload, included, note = encode(
             hit, include_image=attach_image,
             max_chars=max_chars, max_image_kb=max_image_kb,
+            validate_image=validate_image,
         )
         payloads.append(payload)
         notes.append(note)
