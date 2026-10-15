@@ -19,6 +19,12 @@ Compatibility with teammate PR #14 (app/qna_schema.py, unmerged):
 dependency on the unmerged branch: after PR #14 merges, swap
 ``SourceLike`` for ``qna_schema.Source`` — the fields are identical.
 
+Visual-only pages (image, no extractable text) cannot be represented as a
+PR #14 ``Source`` because its ``excerpt`` is a required non-empty str;
+the exported ``EXCERPT_REQUIRED_NOTE`` constant documents this and the
+future interface change (``excerpt: str | None``) that would allow
+image-only evidence.
+
 Image validation is MANIFEST-AUTHORITATIVE: a filename pattern alone
 (e.g. ``page-001.png``) does not prove ownership, so every artifact
 image must (1) live under the claiming document's artifact directory,
@@ -39,6 +45,21 @@ from typing import Dict, List, Optional, Sequence, Tuple
 from app.chunking import Chunk
 from app.fusion import FusedHit, RankedEvidence
 from app.rerank import RerankedCandidate, _mime_type
+
+# PR #14 compatibility note (see module docstring): its Source.excerpt is a
+# required non-empty str, so image-only pages cannot be represented there.
+EXCERPT_REQUIRED_NOTE = (
+    "PR #14's Source requires a non-empty 'excerpt'; image-only pages keep "
+    "their image in the evidence pack but are excluded from Source output "
+    "rather than fabricating text. Future PR #14 revision should allow "
+    "Source(excerpt=None) for visual-only evidence."
+)
+
+__all__ = [
+    "EvidencePack", "EvidenceItem", "SourceLike",
+    "item_from_fused", "item_from_visual", "item_from_page_candidate",
+    "source_position", "validate_artifact_image", "EXCERPT_REQUIRED_NOTE",
+]
 
 
 @dataclass(frozen=True)

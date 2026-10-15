@@ -303,3 +303,91 @@ def production_retrieve(
         outcome.warnings.insert(0, pre_warning)
         outcome.stages["visual"] = "degraded"
     return outcome
+
+
+# ---------------------------------------------------------------------------
+# Application-level retrieval service (Issue #4, Step 7)
+# ---------------------------------------------------------------------------
+
+class RetrievalService:
+    """Stable retrieval entry-point the Q&A UI (later issue) can call.
+
+    Wires the application's REAL initialized services into the pipeline:
+    keyword index, text-vector index, optional visual backend, document
+    store, and a lazy multimodal-reranker factory (constructed on first
+    use, so application startup makes no network calls and the service
+    degrades to text-only evidence if the reranker is unavailable).
+
+    Visual queries ALWAYS use the 9003 unified text embedder (injected by
+    production_retrieve); the incompatible 9002 bridge is never used.
+    """
+
+    def __init__(
+        self,
+        keyword,
+        vector=None,
+        store=None,
+        visual_backend=None,
+        reranker_factory=None,
+    ):
+        self.keyword = keyword
+        self.vector = vector
+        self.store = store
+        self.visual_backend = visual_backend
+        # reranker_factory: () -> RerankClient; None = reranking disabled
+        self._reranker_factory = reranker_factory
+
+    def retrieve(self, query, *, top_k=5, doc_ids=None, include_images=True):
+        reranker = None
+        pre_warning = None
+        if self._reranker_factory is not None:
+            try:
+                reranker = self._reranker_factory()
+            except Exception as exc:
+                pre_warning = f"reranker unavailable: {exc}"
+        outcome = production_retrieve(
+            query,
+            keyword=self.keyword,
+            vector=self.vector,
+            store=self.store,
+            reranker=reranker,
+            visual_index=self.visual_backend,
+            top_k=top_k,
+            doc_ids=doc_ids,
+            include_images=include_images,
+        )
+        if pre_warning:
+            # the plain pipeline reports 'skipped' for a missing reranker;
+            # surface the real reason explicitly
+            outcome.stages["rerank"] = "degraded"
+            outcome.warnings.append(pre_warning)
+        return outcome
+
+
+def build_retrieval_service(indexer, *, reranker_factory=None, visual_backend=None):
+    """Wire a RetrievalService from an initialized CorpusIndexer.
+
+    ``indexer`` may optionally carry a VisualIndexer (indexer.visual); its
+    backend becomes the visual retrieval source. ``visual_backend``
+    overrides that when given. ``reranker_factory`` defaults to a factory
+    for the class RerankClient (lazy; no startup network).
+
+    Pass in injected fakes for offline tests.
+    """
+    backend = visual_backend
+    if backend is None and getattr(indexer, "visual", None) is not None:
+        backend = indexer.visual.backend
+    if reranker_factory is None:
+        from app.rerank import RerankClient
+
+        def default_factory():
+            return RerankClient()
+
+        reranker_factory = default_factory
+    return RetrievalService(
+        keyword=indexer.keyword,
+        vector=indexer.vector,
+        store=indexer.store,
+        visual_backend=backend,
+        reranker_factory=reranker_factory,
+    )
