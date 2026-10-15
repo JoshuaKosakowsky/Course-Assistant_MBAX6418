@@ -44,9 +44,11 @@ reranked before the best evidence (text + images) is passed to the LLM.
 ```bash
 git clone <repo-url> && cd Course-Assistant_MBAX6418
 python -m venv .venv
-# Windows: .venv\Scripts\activate   |   macOS/Linux: source .venv/bin/activate
+# Windows: .venv\Scripts\activate | macOS/Linux: source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env      # then fill in real values (see below)
+cp .env.example .env     # then fill in real values
+pytest                   # unit + smoke (offline)
+python -m app.ui         # launch the Gradio management UI
 ```
 
 ### Class services
@@ -55,6 +57,33 @@ The LLM, embeddings, reranking, and document parsing run on the class
 endpoints at `dobolyi.com`, ports **9001 and above**. Connection details
 (keyed, per-service) come from the project team — see `.env.example` for the
 template. Fill `.env` locally; the file is gitignored.
+
+## Supported formats & conversion
+
+| Input | Handling | Extra software |
+|---|---|---|
+| PDF | Parsed directly: per-page text + page images (150 dpi) | none |
+| PPTX | Auto-converted to PDF before parsing | **LibreOffice** (only for `.pptx` uploads) |
+| anything else | Rejected with a message naming the supported formats | — |
+
+**PPTX auto-conversion** uses headless LibreOffice, the same mechanism as
+manual export:
+
+```bash
+soffice --headless --convert-to pdf --outdir <output_dir> <deck.pptx>
+```
+
+The app locates `soffice` on PATH or in the standard Windows install
+locations; set `LIBREOFFICE_SOFFICE` in `.env` to point elsewhere. If
+LibreOffice is absent, the app returns a clear error — the acceptable
+workaround is exporting the deck to PDF manually and uploading the PDF.
+Converted slides are rendered as page images, so verify after conversion
+that the slide layout still looks correct (any layout regression shows up
+as a garbled page image in the UI).
+
+> Status: PDF parsing is tested (unit + smoke). PPTX conversion is
+> implemented but **unverified locally until LibreOffice is installed** on a
+> dev machine (see PLAN.md).
 
 ## Security (class policy)
 

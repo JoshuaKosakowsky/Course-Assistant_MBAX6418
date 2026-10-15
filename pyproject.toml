@@ -1,5 +1,6 @@
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
 addopts = "-m 'unit or smoke'"
 markers = [
     "unit: fast, offline tests of pure logic (default run)",
