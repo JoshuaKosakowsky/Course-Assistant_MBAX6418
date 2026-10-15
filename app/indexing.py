@@ -128,11 +128,16 @@ class CorpusIndexer:
         self._wired = True
 
     def reconcile(self) -> IndexStats:
-        """Startup reconciliation (offline-safe, no embeddings needed).
+        """Startup reconciliation (offline-safe apart from missing-vector
+        repair, which needs the embedder):
 
         1. Rebuild the in-memory BM25 index from the library + artifacts,
            so deleted documents cannot reappear after a restart.
         2. Prune ChromaDB vectors whose doc_id is no longer in the library.
+        3. Repair: embed documents that have NO stored vectors yet (e.g.
+           the embedding service was down during a previous session).
+           Only missing documents are embedded — existing vectors are
+           preserved and never re-embedded just because the app restarted.
         """
         stats = IndexStats()
         self.keyword = KeywordIndex()
@@ -140,11 +145,20 @@ class CorpusIndexer:
             stats += self._index_one(doc, to_keyword=True, to_vector=False)
         # prune orphan vectors in the persistent store
         known = {d.doc_id for d in self.store.list()}
-        stored_ids = self.vector._collection.get(include=[])["ids"]  # chunk ids
-        for chunk_id in stored_ids:
-            doc_id = chunk_id.split("::", 1)[0]
+        for doc_id in self.vector.stored_doc_ids():
             if doc_id not in known:
                 self.vector.remove_document(doc_id)
+        # repair missing vectors (only for documents that lack them)
+        if self.embedder is not None:
+            present = self.vector.stored_doc_ids()
+            for doc in self.store.list():
+                if doc.doc_id not in present:
+                    try:
+                        stats += self._index_one(
+                            doc, to_keyword=False, to_vector=True
+                        )
+                    except Exception as exc:  # pragma: no cover - defensive
+                        stats.skipped.append(f"vector:{doc.doc_id}: {exc}")
         stats.vector_chunks = self.vector.count
         return stats
 
@@ -188,6 +202,11 @@ class CorpusIndexer:
             self.keyword.add(chunks)
             stats.keyword_chunks = len(chunks)  # per-doc count (summable)
         if to_vector:
+            if self.embedder is None:
+                stats.skipped.append(
+                    f"vector:{doc.doc_id}: keyword-only mode (no embedding configured)"
+                )
+                return stats
             try:
                 self.vector.reindex_document(doc.doc_id, chunks)
                 stats.vector_chunks = len(chunks)  # per-doc count (summable)

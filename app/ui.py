@@ -23,6 +23,8 @@ import pandas as pd
 
 from .config import APP_HOST, APP_PORT
 from .documents import DocumentNotFoundError, DocumentStore
+from .embeddings import EmbeddingsError, TextEmbeddingClient
+from .indexing import CorpusIndexer
 from .parse import ConversionError, parse_file
 
 SUPPORTED_LABEL = (
@@ -91,10 +93,12 @@ def add_file(
             f"'{doc.filename}' is already in the library — no duplicate added.",
         )
 
+    parsed_ok = False
     try:
         result = parse_file(
             store.corpus_path(doc.doc_id), doc.doc_id, store.artifacts_dir / doc.doc_id
         )
+        parsed_ok = True
         note = f"Added '{doc.filename}' · parsed {len(result.pages)} page(s)."
         if result.converted_from:
             note += " (converted from PPTX)"
@@ -103,12 +107,15 @@ def add_file(
     except Exception as exc:  # pragma: no cover - upstream failure surface
         note = f"Added '{doc.filename}', but parsing failed: {exc}"
 
-    if indexer is not None and note.startswith("Added"):
+    if indexer is not None and parsed_ok:
         try:
             stats = indexer.index_document(doc.doc_id)
             note += f" · indexed {stats.chunks} chunk(s)"
             if stats.skipped:
-                note += " · vectors skipped (embedding service unavailable)"
+                if indexer.embedder is None:
+                    note += " · vectors skipped (keyword-only mode: no embedding configured)"
+                else:
+                    note += " · vectors skipped (embedding service unavailable)"
             if stats.errors:
                 note += " · indexing errors (see application log)"
         except Exception as exc:
@@ -185,5 +192,26 @@ def build_ui(store: DocumentStore | None = None, indexer=None) -> gr.Blocks:
     return demo
 
 
+def _production_indexer() -> tuple[DocumentStore, CorpusIndexer]:
+    """Production startup wiring for ``python -m app.ui``.
+
+    Builds the real embedding client from the local .env; when credentials
+    are missing or the service is down, the app degrades to keyword-only
+    mode (BM25 still works) and never substitutes a fake embedder.
+    """
+    store = DocumentStore()
+    embedder = None
+    try:
+        embedder = TextEmbeddingClient()
+        print(f"Semantic search: using {embedder.model!r} at {embedder.base_url}")
+    except EmbeddingsError as exc:
+        print(f"Keyword-only mode (semantic search disabled): {exc}")
+    indexer = CorpusIndexer(store, embedder=embedder)
+    return store, indexer
+
+
 if __name__ == "__main__":
-    build_ui().launch(server_name=APP_HOST, server_port=APP_PORT, inbrowser=False)
+    store, indexer = _production_indexer()
+    build_ui(store, indexer).launch(
+        server_name=APP_HOST, server_port=APP_PORT, inbrowser=False
+    )

@@ -104,6 +104,11 @@ class TextVectorIndex:
 
     def add(self, chunks: Sequence[Chunk]) -> None:
         """Embed and upsert chunk records (idempotent per chunk_id)."""
+        if self._embedder is None:
+            raise EmbeddingsError(
+                "no embedder configured (keyword-only mode): semantic "
+                "indexing is unavailable"
+            )
         chunks = list(chunks)
         if not chunks:
             return
@@ -144,6 +149,12 @@ class TextVectorIndex:
             self._collection.delete(ids=ids)
         return removed
 
+    def stored_doc_ids(self) -> set:
+        """Set of doc_ids that currently have at least one stored vector
+        (chunk ids are ``{doc_id}::p{page}::c{index}``)."""
+        ids = self._collection.get(include=[])["ids"]
+        return {cid.split("::", 1)[0] for cid in ids}
+
     def reindex_document(self, doc_id: str, chunks: Sequence[Chunk]) -> None:
         """Replace a document's vectors (old chunking settings dropped)."""
         self.remove_document(doc_id)
@@ -174,7 +185,7 @@ class TextVectorIndex:
         if not isinstance(top_k, int) or isinstance(top_k, bool) or top_k < 1:
             raise ValueError(f"top_k must be a positive integer, got {top_k!r}")
         text = (query or "").strip()
-        if not text or self.count == 0:
+        if not text or self.count == 0 or self._embedder is None:
             return []
         allowed = list(doc_ids) if doc_ids is not None else None
         if allowed == []:
