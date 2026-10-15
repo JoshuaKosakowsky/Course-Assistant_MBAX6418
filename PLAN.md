@@ -25,9 +25,9 @@ Status legend: `pending` (not started) · `in progress` · `done`.
 - [x] Document management (Task 1): add with content dedup (sha256), list,
       remove with cascade delete of corpus copy + artifacts + record;
       removal hooks for future indexes (app/documents.py)
-- [ ] PPTX conversion verified with LibreOffice installed — **unverified**;
-      no `.pptx` sample or LibreOffice installation is available in this
-      environment
+- [x] PPTX conversion verified with LibreOffice 26.8.1 on five
+      representative lecture decks: 145 slides converted; every slide yielded
+      non-empty text and a 150 dpi PNG; embedded-image counts recorded
 - [x] Sample corpus in `data/` (gitignored): syllabus + five course slide PDFs
       from Canvas; parsed 152 pages, all with extracted text and 150 dpi PNGs;
       first-page visual spot-check confirmed intact layouts
