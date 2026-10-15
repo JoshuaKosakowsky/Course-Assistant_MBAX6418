@@ -90,25 +90,36 @@ assert removed == 3 and idx.count() == 0
 
 # ---- integrity scenario: collection loss + repair via PUBLIC API -------
 idx2 = VisualIndex(root / "i2", embedder=emb)
-ids2 = [idx2.add_image("doc-a", n, p) for n, p in enumerate(paths, start=1)]
+# TWIN images on pages 1 and 2 (identical bytes) + a distinct page 3; the
+# content-addressed ids embed the page number, so the twins never share an id
+twin = root / "twin.png"
+make_img(twin, "twin-content")
+vid1 = idx2.add_image("doc-a", 1, twin)          # page 1 = twin bytes
+vid2 = idx2.add_image("doc-a", 2, twin)          # page 2 = SAME twin bytes
+vid3 = idx2.add_image("doc-a", 3, root / "page-3.png")
+ids2 = [vid1, vid2, vid3]
+assert len({vid1, vid2, vid3}) == 3              # ids embed the page number
 assert idx2.count() == 3
-# simulate partial collection loss (TEST HARNESS ONLY: direct Chroma delete;
-# the app code itself never touches the private collection)
-lost = ids2[0]
-idx2._collection.delete(ids=[lost])
+# simulate partial collection loss: page 1's vector vanishes (harness only;
+# app code never touches the private collection)
+idx2._collection.delete(ids=[vid1])
 assert idx2.count() == 2
-# repair through the public interface, exactly as app/visual.py does:
-# embed the page -> query k=1 -> distance > eps => vector lost -> re-add
+# repair through the PUBLIC interface with IDENTITY matching (exactly as
+# app/visual.py does): recompute the expected content-addressed id from
+# the image bytes + (doc, page) and require that id among the returned hits
 restored = 0
-for n, p in enumerate(paths, start=1):
+for n, p in [(1, twin), (2, twin), (3, root / "page-3.png")]:
+    with p.open("rb") as fh:
+        import hashlib
+        vid = f"doc-a:{n}:" + hashlib.sha256(fh.read()).hexdigest()[:10]
     vec = emb(Image.open(p))
-    top = idx2.query_embedding(vec, k=1)
-    if not top or top[0].distance > 0.05:
+    top = idx2.query_embedding(vec, k=2)
+    if vid not in [h.id for h in top]:
         idx2.add_image("doc-a", n, p, embedding=vec)
         restored += 1
 assert restored == 1 and idx2.count() == 3
-verify = idx2.query_embedding(emb(Image.open(paths[0])), k=1)
-assert verify[0].page == 1 and verify[0].distance <= 0.05
+present = [h.id for h in idx2.query_embedding(emb(Image.open(twin)), k=2)]
+assert ids2[0] in present and ids2[1] in present  # BOTH twins indexed
 
 print(json.dumps({
     "pages": [h.page for h in hits],
@@ -116,7 +127,7 @@ print(json.dumps({
     "stable_id": same == ids[0],
     "removed": removed,
     "lost_repaired": restored,
-    "post_repair_self_distance": round(verify[0].distance, 6),
+    "twins_present": ids2[0] in present and ids2[1] in present,
 }))
 """
 
@@ -138,6 +149,7 @@ def test_real_visual_index_class_with_fake_embeddings():
     assert data["stable_id"] is True    # content-addressed image id stable
     assert data["removed"] == 3         # remove_doc purged everything
     # integrity scenario on her REAL class: lost vector detected via the
-    # public count()/query_embedding() API and re-added, distance ~0
+    # public count()/query_embedding() API and re-added by IDENTITY
+    # (identical twin pages stay distinct — both ids present afterward)
     assert data["lost_repaired"] == 1
-    assert data["post_repair_self_distance"] <= 0.05
+    assert data["twins_present"] is True

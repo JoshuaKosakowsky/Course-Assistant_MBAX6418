@@ -392,26 +392,35 @@ class VisualIndexer:
 
     # -- integrity repair (state may outlive a lost vector) -------------
 
-    SELF_MATCH_EPSILON = 0.05  # cosine distance of a page vs its own vector
-
     def repair_missing_vectors(self) -> IndexStats:
         """Verify state-recorded pages against the backend and re-add the
         ones whose vectors are genuinely gone.
 
         Triggered ONLY when the backend's total entry count is below the
         state's expected total (a cheap aggregate gate that keeps normal
-        restarts at zero embeddings). Verification uses the PUBLIC
-        interface (embed the page -> query_embedding k=1): a hit at
-        distance ~0 proves the exact content is indexed. Pages whose file
-        changed (stat mismatch) are left to the normal incremental pass —
-        they will be re-added there — and pages whose verification embed
-        fails are reported, never guessed.
+        restarts at zero embeddings).
 
-        LIMITATION (documented, not hidden): MSpanny's VisualIndex exposes
-        no per-doc/per-page inspection (only count/query/add/remove), so
-        one embedding call per checked page is required; this is also
-        communicated to PR #11 as a candidate API addition. If the backend
-        lacks query_embedding/count, the check is skipped and reported.
+        IDENTITY, not distance: two pages can share a near-identical
+        image, so a low nearest-neighbour distance does NOT prove the
+        specific (doc, page) record exists. MSpanny's VisualIndex returns
+        a content-addressed ``VisualHit.id`` of the form
+        ``{doc_id}:{page}:{sha256(image_bytes)[:10]}`` — exactly the
+        digest our state records — so the expected id is recomputed from
+        state and a page is 'present' ONLY when a returned hit carries
+        that exact id. A deleted record's id can never be matched by a
+        surviving twin page (the id embeds the page number), so the twin
+        is never mistaken for proof, and re-adding the lost record never
+        damages the survivor.
+
+        If the backend returns hits without an ``id`` attribute the
+        record cannot be verified by identity; the SAFEST recovery is
+        then a re-add (idempotent content-addressed upsert — restores a
+        missing record and leaves a present one byte-identical), which is
+        what happens. Documented limitation: identical-content pages are
+        only distinguishable by their ids.
+
+        Pages whose file changed (stat mismatch) are left to the normal
+        incremental pass, and verify failures are reported, never guessed.
         """
         stats = IndexStats()
         if not callable(getattr(self.backend, "query_embedding", None)) or \
@@ -434,15 +443,24 @@ class VisualIndexer:
                 try:
                     with Image.open(image_path) as im:
                         vec = self.image_embedder(resize_for_embedding(im))
-                    hits = self.backend.query_embedding(vec, k=1)
+                    hits = self.backend.query_embedding(vec, k=2)
                 except Exception as exc:
                     stats.visual_failed.append(
                         f"{doc.doc_id} p{page_no}: integrity verify failed: {exc}"
                     )
                     continue
-                if hits and hits[0].distance <= self.SELF_MATCH_EPSILON:
-                    continue  # present — no re-embed
-                # vector lost: restore with the SAME doc/page/path metadata
+                digest = str(entry.get("d", "") or "")
+                expected_id = f"{doc.doc_id}:{page_no}:{digest[:10]}"
+                ids = [getattr(h, "id", None) for h in hits]
+                present = expected_id in ids
+                if present:
+                    continue  # the exact (doc, page) record is indexed
+                if ids and all(i is None for i in ids):
+                    # ids unavailable: cannot verify identity -> safest
+                    # recovery is an idempotent re-add (never harmful)
+                    pass
+                # vector record lost (or identities unverifiable): restore
+                # with the SAME doc/page/path metadata
                 try:
                     self.backend.add_image(
                         doc.doc_id, page_no, image_path, embedding=vec

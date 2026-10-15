@@ -58,7 +58,11 @@ class ChromaLikeBackend:
         if self.add_fail_on_n is not None:
             if self.embed_calls > self.add_fail_on_n:
                 raise RuntimeError("simulated embed failure")
-        vid = f"{doc_id}:{page}:{len(self.vectors)}"
+        # content-addressed id, exactly like MSpanny's _image_id():
+        # {doc_id}:{page}:{sha256(full file bytes)[:10]} — embeds the page
+        # identity, so twin images on different pages NEVER share an id
+        digest = ChromaLikeBackend._sha(Path(image_path))
+        vid = f"{doc_id}:{page}:{digest[:10]}"
         self.vectors[vid] = {
             "doc_id": doc_id, "page": int(page), "image_path": str(image_path),
             "vec": list(embedding or []),
@@ -89,6 +93,13 @@ class ChromaLikeBackend:
             })()
             for vid, dist, e in scored[:k]
         ]
+
+    @staticmethod
+    def _sha(path) -> str:
+        import hashlib
+
+        with Path(path).open("rb") as fh:
+            return hashlib.sha256(fh.read()).hexdigest()
 
     # -- test-only simulation helpers -------------------------------------
 
@@ -365,3 +376,56 @@ def test_backfill_unavailable_exits_nonzero(tmp_path, monkeypatch, capsys):
     assert rc == 1
     err = capsys.readouterr().err
     assert "--visual-backfill" in err and "NOT performed" in err
+
+
+# --------------------------------------------------------------------------
+# E. IDENTITY check: twin (identical) images on different pages (Sec.2 of
+#    the publication check) — distance alone must never prove presence
+# --------------------------------------------------------------------------
+
+def test_identical_pages_restored_by_identity_not_distance(tmp_path):
+    """REGRESSION: two pages with IDENTICAL image bytes. Delete page 1's
+    vector; the surviving twin is the nearest neighbour at distance ~0 —
+    the OLD distance-based repair would call it 'present' and never
+    restore page 1. The id-based check must restore page 1 WITHOUT
+    damaging page 2."""
+    store = DocumentStore(root=tmp_path / "data")
+    # a 2-page PDF whose pages render IDENTICALLY (same bytes)
+    d = pymupdf.open()
+    for _ in range(2):
+        pg = d.new_page()
+        pg.insert_text((72, 72), "identical slide")
+    d.save(str(tmp_path / "twin.pdf"))
+    d.close()
+    rec = store.add(tmp_path / "twin.pdf")
+    from app.parse import parse_file
+    parse_file(store.corpus_path(rec.doc_id), rec.doc_id,
+               store.artifacts_dir / rec.doc_id)
+
+    backend = ChromaLikeBackend()
+    state = VisualState(tmp_path / "vs.json")
+    visual = VisualIndexer(backend, backend.embed, store, state=state)
+    indexer = CorpusIndexer(store, embedder=FakeEmbedder(),
+                            persist_dir=tmp_path / "db", visual=visual)
+    indexer.index_document(rec.doc_id)
+    pages = manifest_pages(store, rec.doc_id)
+    assert backend.count() == 2
+    # both page images are byte-identical twins
+    img1, img2 = (Path(pg["image_path"]) for pg in pages)
+    assert img1.read_bytes() == img2.read_bytes()
+    # ...yet their record ids embed the page number and differ
+    vid1 = f"{rec.doc_id}:1:{ChromaLikeBackend._sha(img1)[:10]}"
+    vid2 = f"{rec.doc_id}:2:{ChromaLikeBackend._sha(img2)[:10]}"
+    assert vid1 != vid2
+    assert vid1 in backend.vectors and vid2 in backend.vectors
+
+    # delete page 1's vector; leave its state entry intact
+    backend.drop_vector(rec.doc_id, 1)
+    assert backend.count() == 1
+
+    stats = indexer.reconcile()
+    assert stats.visual_repaired == 1          # page 1 restored
+    assert backend.count() == 2
+    assert vid1 in backend.vectors             # the EXACT record came back
+    assert vid2 in backend.vectors             # survivor untouched
+    assert backend.vectors[vid2]["image_path"] == str(img2)
