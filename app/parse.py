@@ -58,21 +58,32 @@ class ParseResult:
 
 
 def find_soffice() -> Path | None:
-    """Locate LibreOffice's soffice binary: env override, PATH, or the
-    standard Windows install paths."""
+    """Locate LibreOffice's console launcher: env override, PATH, or
+    standard Windows install paths. Prefer ``soffice.com`` on Windows so
+    subprocesses can reliably capture output from headless conversions."""
     override = os.environ.get("LIBREOFFICE_SOFFICE")
     if override and Path(override).is_file():
-        return Path(override)
+        return _console_launcher(Path(override))
     exe = shutil.which("soffice") or shutil.which("libreoffice")
     if exe:
-        return Path(exe)
+        return _console_launcher(Path(exe))
     for candidate in (
         "C:/Program Files/LibreOffice/program/soffice.exe",
         "C:/Program Files (x86)/LibreOffice/program/soffice.exe",
     ):
-        if Path(candidate).is_file():
-            return Path(candidate)
+        path = Path(candidate)
+        if path.is_file():
+            return _console_launcher(path)
     return None
+
+
+def _console_launcher(path: Path) -> Path:
+    """Use the console-subsystem launcher when available on Windows."""
+    if os.name == "nt" and path.suffix.lower() == ".exe":
+        console_path = path.with_suffix(".com")
+        if console_path.is_file():
+            return console_path
+    return path
 
 
 def convert_pptx_to_pdf(source: Path, out_dir: Path) -> Path:
