@@ -1,0 +1,98 @@
+"""Grounded question answering orchestrator (Phase 4, issue #5).
+
+Pipeline: persona + evidence prompt -> vision LLM -> tolerant parse ->
+grounding normalization -> automated source-support check.
+
+On malformed output it retries (configurable, default once), then returns
+an honest fallback instead of surfacing unvalidated model text. All
+external dependencies (the LLM) are injected, so the whole core is
+testable offline with stubs; production wires :class:`ClassVisionClient`.
+
+The evidence pack input uses the same :class:`Source` shape Phase 3 will
+produce (document, page, excerpt, image_path) — coordination flagged on
+issue #5 / #4.
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Sequence
+
+from .prompts import build_messages
+from .qna_schema import ParsedAnswer, QnaParseError, Source, parse_answer
+from .source_check import SourceCheck, check_sources
+
+logger = logging.getLogger(__name__)
+
+MISSING_INFO_FALLBACK = (
+    "I don't have that in the course materials, so I can't answer from "
+    "evidence. If you can point me at the right material or topic, I'll "
+    "look it up."
+)
+
+
+@dataclass(frozen=True)
+class QnaResult:
+    answer: str
+    sources: tuple[Source, ...] = ()
+    grounded: bool = False
+    source_checks: tuple[SourceCheck, ...] = ()
+    malformed: bool = False
+
+
+@dataclass
+class QnaConfig:
+    retries: int = 1  # extra attempts after a malformed reply
+    max_images: int = 4
+    persona_path: Path | None = None
+
+
+class QnaOrchestrator:
+    """Answer a question from evidence with structured, verified output."""
+
+    def __init__(self, llm: Any, config: QnaConfig | None = None):
+        self.llm = llm
+        self.config = config or QnaConfig()
+
+    def answer(self, question: str, evidence: Sequence[Source] = ()) -> QnaResult:
+        messages = build_messages(
+            question,
+            evidence,
+            persona_path=self.config.persona_path,
+            max_images=self.config.max_images,
+        )
+
+        parsed: ParsedAnswer | None = None
+        malformed = False
+        for attempt in range(self.config.retries + 1):
+            raw = self.llm.chat(messages)
+            try:
+                parsed = parse_answer(raw)
+                break
+            except QnaParseError as exc:
+                logger.warning(
+                    "Malformed Q&A output (attempt %d/%d): %s",
+                    attempt + 1,
+                    self.config.retries + 1,
+                    exc,
+                )
+                if attempt < self.config.retries:
+                    continue
+                malformed = True
+
+        if parsed is None or malformed:
+            return QnaResult(answer=MISSING_INFO_FALLBACK, grounded=False, malformed=True)
+
+        # A grounded answer must actually cite sources; anything else is
+        # normalized to the honest not-in-materials state.
+        grounded = parsed.grounded and bool(parsed.sources)
+        answer = parsed.answer if parsed.answer.strip() else MISSING_INFO_FALLBACK
+
+        if not grounded:
+            return QnaResult(answer=answer, grounded=False)
+
+        sources = tuple(parsed.sources)
+        checks = check_sources(answer, sources)
+        return QnaResult(answer=answer, sources=sources, grounded=True, source_checks=checks)
