@@ -62,6 +62,7 @@ class IndexStats:
     vector_chunks: int = 0
     visual_pages: int = 0   # page images embedded into the visual index
     visual_added: int = 0   # == visual_pages today (kept for clarity/summing)
+    visual_repaired: int = 0  # vectors restored after detected loss (integrity)
     skipped: List[str] = field(default_factory=list)      # e.g. vector service down
     errors: List[str] = field(default_factory=list)       # e.g. unparseable document
     visual_skipped: List[str] = field(default_factory=list)  # already-indexed pages
@@ -75,6 +76,7 @@ class IndexStats:
             "keyword_chunks": self.keyword_chunks,
             "vector_chunks": self.vector_chunks,
             "visual_pages": self.visual_pages,
+            "visual_repaired": self.visual_repaired,
             "skipped": self.skipped,
             "errors": self.errors,
             "visual_skipped": self.visual_skipped,
@@ -90,6 +92,7 @@ class IndexStats:
             vector_chunks=self.vector_chunks + other.vector_chunks,
             visual_pages=self.visual_pages + other.visual_pages,
             visual_added=self.visual_added + other.visual_added,
+            visual_repaired=self.visual_repaired + other.visual_repaired,
             skipped=self.skipped + other.skipped,
             errors=self.errors + other.errors,
             visual_skipped=self.visual_skipped + other.visual_skipped,
@@ -404,8 +407,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     else:
         stats = indexer.index_library()
         stats.vector_chunks = indexer.vector.count
-        if indexer.visual is not None and args.visual_backfill:
-            stats += indexer.visual.reconcile(force=True)
+
+    # explicit visual backfill: an explicit request must never report
+    # overall success when the visual index cannot do the work
+    if args.visual_backfill:
+        if indexer.visual is None:
+            print(
+                f"ERROR: --visual-backfill requested, but the visual "
+                f"index is unavailable ({reason}); text indexing above is "
+                f"complete, the backfill was NOT performed.",
+                file=sys.stderr,
+            )
+            return 1
+        stats += indexer.visual.reconcile(force=True)
+
     print(f"Indexed library: {_stats_line(stats)}")
     print(f"Status: {indexer.status()}")
     if stats.errors:

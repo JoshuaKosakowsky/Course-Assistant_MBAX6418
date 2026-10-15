@@ -110,22 +110,40 @@ DEFAULT_STATE_PATH = config.DATA_ROOT / "indexes" / "visual_state.json"
 class VisualState:
     """Persistent record of which (doc, page) images are already embedded.
 
-    Mapping: doc_id -> {str(page): {"m": mtime_ns, "s": size_bytes,
-    "d": sha256}}. The stat snapshot lets a restart skip unchanged pages
-    with ZERO file hashing/network; a content change (size or mtime moved)
-    triggers re-embedding; a corrupt/missing file fails to stat and is
-    honestly reported as failed rather than treated as indexed.
+    File layout (new format): {"docs": {doc_id: {page: {"m","s","d"}}},
+    "pending": [doc_id, ...]}. The stat snapshot lets a restart skip
+    unchanged pages with ZERO file hashing/network; a content change (size
+    or mtime moved) triggers re-embedding; a corrupt/missing file fails to
+    stat and is honestly reported as failed rather than treated as indexed.
+
+    ``pending`` is the durable retry queue for document purges whose
+    backend call failed (e.g. ChromaDB offline at deletion time): entries
+    stay there until a remove_doc succeeds, so stale vectors can be
+    retried after a restart instead of being silently abandoned.
     """
 
     def __init__(self, path: Path | str | None = None):
         self.path = Path(path) if path else DEFAULT_STATE_PATH
         self._data: Dict[str, Dict[str, Dict[str, object]]] = {}
+        self._pending: List[str] = []
+        self.corrupted = False
         self._lock = threading.Lock()
         if self.path.is_file():
             try:
-                self._data = json.loads(self.path.read_text(encoding="utf-8"))
+                raw = json.loads(self.path.read_text(encoding="utf-8"))
+                if isinstance(raw, dict) and "docs" in raw:
+                    self._data = raw.get("docs", {}) or {}
+                    self._pending = list(raw.get("pending", []) or [])
+                else:
+                    # legacy layout: the whole object WAS the docs mapping
+                    self._data = raw or {}
+                    self._pending = []
             except Exception:
+                # unreadable state must never block startup; flag it so a
+                # clear backfill hint can be shown instead of silent trust
                 self._data = {}
+                self._pending = []
+                self.corrupted = True
 
     def get(self, doc_id: str) -> Dict[str, Dict[str, object]]:
         return dict(self._data.get(doc_id, {}))
@@ -150,12 +168,32 @@ class VisualState:
         with self._lock:
             self._data.pop(doc_id, None)
 
+    # -- durable pending removals (failed visual purges) -----------------
+
+    def add_pending(self, doc_id: str) -> None:
+        with self._lock:
+            if doc_id not in self._pending:
+                self._pending.append(doc_id)
+
+    def drop_pending(self, doc_id: str) -> None:
+        with self._lock:
+            if doc_id in self._pending:
+                self._pending.remove(doc_id)
+
+    def pending_doc_ids(self) -> list[str]:
+        with self._lock:
+            return list(self._pending)
+
     def save(self) -> None:
         with self._lock:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.path.with_suffix(".tmp")
             tmp.write_text(
-                json.dumps(self._data, sort_keys=True, indent=1), encoding="utf-8"
+                json.dumps(
+                    {"docs": self._data, "pending": self._pending},
+                    sort_keys=True, indent=1,
+                ),
+                encoding="utf-8",
             )
             tmp.replace(self.path)
 
@@ -254,29 +292,71 @@ class VisualIndexer:
         """Bring the visual index in line with the library, page by page.
 
         Incremental rules (zero network for already-correct pages):
-        - Docs NEVER seen by the visual pipeline (no state record) are
-          skipped here — they are indexed at upload time via
-          index_document or en masse via the explicit ``--visual-backfill``
-          command. This is what guarantees a plain restart never triggers
-          an automatic full-library visual reindex.
-        - Docs whose state matches the manifest (same page set, images
-          present) are skipped entirely.
-        - Docs whose pages changed are safely purged (remove_doc) and
-          re-added from the manifest.
-        - Stale state entries for docs no longer in the library are
-          purged (their vectors cannot resurface after restart).
-        - Missing/corrupt images are counted as failed and retried next
-          run — never claimed as indexed.
+        0. RETRY failed deletions (durable pending queue) — see
+           remove_document/_purge_doc: a purge that failed while ChromaDB
+           was down stays queued until it succeeds, across restarts.
+        1. Prune orphan state (deleted docs that predate the feature).
+        2. INTEGRITY: a tracking entry is NOT proof the vector still
+           exists — if the backend's total count is below the state's
+           expected total (e.g. partial collection loss), the affected
+           pages are verified via their own embedding and only genuinely
+           missing ones are re-added (see repair_missing_vectors).
+        3. Per-doc incremental pass (unchanged pages -> zero calls).
 
         ``force=True`` ignores state and re-embeds everything (the
         explicit backfill command).
         """
         stats = IndexStats()
         known = {d.doc_id for d in self.store.list()}
-        # prune orphan state (deleted docs that predate the feature)
+
+        # 0. retry failed deletions (durable across restarts)
+        for doc_id in self.state.pending_doc_ids():
+            try:
+                self.backend.remove_doc(doc_id)
+                self.state.drop_pending(doc_id)
+                if doc_id not in known:
+                    # orphan doc: fully forgotten once purged
+                    self.state.drop_doc(doc_id)
+            except Exception as exc:
+                stats.visual_failed.append(
+                    f"{doc_id}: pending visual purge still failing: {exc}"
+                )
+
+        # 1. prune orphan state (deleted docs that predate the feature);
+        #    _purge_doc keeps failures in the pending queue instead of
+        #    silently dropping the tracking entry
         for doc_id in self.state.doc_ids():
             if doc_id not in known:
                 self._purge_doc(doc_id, stats)
+
+        # 2. integrity: state entries must not be trusted blindly
+        if not force:
+            has_count = callable(getattr(self.backend, "count", None))
+            has_query = callable(getattr(self.backend, "query_embedding", None))
+            if not (has_count and has_query):
+                # documented limitation, surfaced — never invented success
+                stats.visual_failed.append(
+                    "integrity check unavailable: backend exposes no "
+                    "count()/query_embedding() (documented limitation)"
+                )
+            else:
+                expected = sum(
+                    len(self.state.get(d)) for d in self.state.doc_ids()
+                )
+                try:
+                    actual = int(self.backend.count())
+                except Exception:
+                    actual = -1
+                if 0 <= actual < expected:
+                    stats += self.repair_missing_vectors()
+                elif self.state.corrupted and actual > 0:
+                    stats.visual_failed.append(
+                        "visual state file was unreadable but the backend "
+                        "still has entries — run 'python -m app.indexing "
+                        "--visual-backfill' to rebuild state safely "
+                        "(content-addressed ids prevent duplicates)"
+                    )
+
         for doc in self.store.list():
             if force:
                 self._purge_doc(doc.doc_id, stats)
@@ -310,26 +390,102 @@ class VisualIndexer:
         self.state.save()
         return stats
 
+    # -- integrity repair (state may outlive a lost vector) -------------
+
+    SELF_MATCH_EPSILON = 0.05  # cosine distance of a page vs its own vector
+
+    def repair_missing_vectors(self) -> IndexStats:
+        """Verify state-recorded pages against the backend and re-add the
+        ones whose vectors are genuinely gone.
+
+        Triggered ONLY when the backend's total entry count is below the
+        state's expected total (a cheap aggregate gate that keeps normal
+        restarts at zero embeddings). Verification uses the PUBLIC
+        interface (embed the page -> query_embedding k=1): a hit at
+        distance ~0 proves the exact content is indexed. Pages whose file
+        changed (stat mismatch) are left to the normal incremental pass —
+        they will be re-added there — and pages whose verification embed
+        fails are reported, never guessed.
+
+        LIMITATION (documented, not hidden): MSpanny's VisualIndex exposes
+        no per-doc/per-page inspection (only count/query/add/remove), so
+        one embedding call per checked page is required; this is also
+        communicated to PR #11 as a candidate API addition. If the backend
+        lacks query_embedding/count, the check is skipped and reported.
+        """
+        stats = IndexStats()
+        if not callable(getattr(self.backend, "query_embedding", None)) or \
+                not callable(getattr(self.backend, "count", None)):
+            stats.visual_failed.append(
+                "integrity check unavailable: backend exposes no "
+                "count()/query_embedding() (documented limitation)"
+            )
+            return stats
+        for doc in self.store.list():
+            for page_no, image_path in self._manifest_pages(doc):
+                entry = self.state.get(doc.doc_id).get(str(page_no))
+                if entry is None:
+                    continue  # never-seen page: normal pass handles it
+                stat = _file_stat(Path(image_path))
+                if stat is None or (
+                        entry.get("m") == stat[0] and entry.get("s") == stat[1]
+                ) is False:
+                    continue  # changed/missing file: normal pass handles it
+                try:
+                    with Image.open(image_path) as im:
+                        vec = self.image_embedder(resize_for_embedding(im))
+                    hits = self.backend.query_embedding(vec, k=1)
+                except Exception as exc:
+                    stats.visual_failed.append(
+                        f"{doc.doc_id} p{page_no}: integrity verify failed: {exc}"
+                    )
+                    continue
+                if hits and hits[0].distance <= self.SELF_MATCH_EPSILON:
+                    continue  # present — no re-embed
+                # vector lost: restore with the SAME doc/page/path metadata
+                try:
+                    self.backend.add_image(
+                        doc.doc_id, page_no, image_path, embedding=vec
+                    )
+                    stats.visual_repaired += 1
+                except Exception as exc:
+                    stats.visual_failed.append(
+                        f"{doc.doc_id} p{page_no}: repair re-add failed: {exc}"
+                    )
+        self.state.save()
+        return stats
+
     def _purge_doc(self, doc_id: str, stats: IndexStats) -> None:
-        """Purge one doc from the visual backend + state (local op)."""
+        """Purge one doc from the visual backend + state (local op).
+
+        On backend failure the tracking entry is NOT dropped: the doc is
+        queued in the durable pending list so reconciliation retries the
+        purge after a restart instead of abandoning stale vectors."""
         try:
             self.backend.remove_doc(doc_id)
+            self.state.drop_doc(doc_id)
         except Exception as exc:
-            stats.visual_failed.append(f"{doc_id}: visual purge failed: {exc}")
-        self.state.drop_doc(doc_id)
+            self.state.add_pending(doc_id)
+            stats.visual_failed.append(f"{doc_id}: visual purge failed (queued for retry): {exc}")
+        self.state.save()
 
     # -- deletion hook target -------------------------------------------
 
     def remove_document(self, doc_id: str) -> None:
         """Removal-hook target: purge visual entries + state. Local-only
         (ChromaDB delete), so it works while the embedding service is
-        down; failures are swallowed with a warning — the text indexes are
-        purged by CorpusIndexer regardless."""
+        down; on failure the doc is queued in the persisted pending list
+        and reconcile retries the purge on the next run — stale vectors
+        can never be abandoned silently. The text indexes are purged by
+        CorpusIndexer regardless."""
         try:
             self.backend.remove_doc(doc_id)
-        except Exception as exc:  # pragma: no cover - defensive
-            print(f"warning: visual purge failed for {doc_id}: {exc}")
-        self.state.drop_doc(doc_id)
+            self.state.drop_doc(doc_id)
+            self.state.drop_pending(doc_id)
+        except Exception as exc:
+            self.state.add_pending(doc_id)
+            print(f"warning: visual purge failed for {doc_id} "
+                  f"(queued for retry): {exc}")
         self.state.save()
 
     def count(self) -> int:

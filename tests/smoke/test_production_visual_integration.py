@@ -329,6 +329,8 @@ def test_deletion_purges_all_three_indexes(tmp_path):
 
 
 def test_deletion_when_visual_service_down(tmp_path):
+    """A failed visual purge must NOT pretend success: the tracking entry
+    stays and the purge is queued for retry (durable across restarts)."""
     store, rec, indexer, backend = build_env(tmp_path)
     indexer.register_hooks()
     indexer.index_document(rec.doc_id)
@@ -336,6 +338,14 @@ def test_deletion_when_visual_service_down(tmp_path):
     store.remove(rec.doc_id)          # must not raise
     assert indexer.keyword.size == 0
     assert indexer.vector.stored_doc_ids() == set()
+    # honest failure state: still tracked + queued (NOT silently dropped)
+    assert rec.doc_id in indexer.visual.state.doc_ids()
+    assert rec.doc_id in indexer.visual.state.pending_doc_ids()
+    # recovery on a later run when ChromaDB is back
+    backend.fail_remove = False
+    indexer.reconcile()
+    assert backend.count() == 0
+    assert rec.doc_id not in indexer.visual.state.pending_doc_ids()
     assert rec.doc_id not in indexer.visual.state.doc_ids()
 
 

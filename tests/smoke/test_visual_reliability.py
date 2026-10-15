@@ -1,0 +1,367 @@
+"""Focused reliability audit tests (Issue #4, Step 8) — offline.
+
+Covers the three confirmed defects:
+  A) tracking state can outlive a lost ChromaDB vector  -> integrity repair
+  B) a failed visual deletion abandons stale vectors    -> durable pending
+                                                           retry across restart
+  C) explicit --visual-backfill silently succeeds when the visual index
+     is unavailable                                       -> non-zero exit
+
+The fake backend behaves like MSpanny's VisualIndex (real cosine
+distance over stored embeddings) so the repair path is exercised
+exactly as it will run against ChromaDB.
+"""
+
+from __future__ import annotations
+
+import json
+import math
+import pymupdf
+import pytest
+from pathlib import Path
+
+from app.documents import DocumentStore
+from app.indexing import CorpusIndexer, main as indexing_main
+from app.keyword import KeywordIndex
+from app.vector import TextVectorIndex
+from app.visual import VisualIndexer, VisualState
+from tests.fake_embeddings import FakeEmbedder
+from PIL import Image
+
+pytestmark = pytest.mark.smoke
+
+
+# --------------------------------------------------------------------------
+# Chroma-like backend
+# --------------------------------------------------------------------------
+
+class ChromaLikeBackend:
+    """Duck-typed VisualIndex stand-in with REAL cosine distance.
+
+    Public surface: add_image / remove_doc / count / query_embedding —
+    exactly what MSpanny's VisualIndex exposes to our app code. Extra
+    helpers (drop_vector, fail_next_remove, fail_next_add) exist purely
+    for simulating failure/loss in tests.
+    """
+
+    def __init__(self):
+        self.vectors: dict[str, dict] = {}
+        self.added: list[tuple] = []
+        self.removed: list[str] = []
+        self.embed_calls = 0
+        self.fail_remove = False
+        self.add_fail_on_n: int | None = None   # fail add after N successes
+
+    # -- public API (mirrors VisualIndex) --------------------------------
+
+    def add_image(self, doc_id, page, image_path, embedding=None):
+        if self.add_fail_on_n is not None:
+            if self.embed_calls > self.add_fail_on_n:
+                raise RuntimeError("simulated embed failure")
+        vid = f"{doc_id}:{page}:{len(self.vectors)}"
+        self.vectors[vid] = {
+            "doc_id": doc_id, "page": int(page), "image_path": str(image_path),
+            "vec": list(embedding or []),
+        }
+        self.added.append((doc_id, int(page), str(image_path)))
+        return vid
+
+    def remove_doc(self, doc_id):
+        if self.fail_remove:
+            raise RuntimeError("chroma offline")
+        self.removed.append(doc_id)
+        for vid in [v for v, e in self.vectors.items() if e["doc_id"] == doc_id]:
+            del self.vectors[vid]
+        return 1
+
+    def count(self):
+        return len(self.vectors)
+
+    def query_embedding(self, embedding, k=5):
+        scored = sorted(
+            ((id_, _cosine_dist(e["vec"], embedding), e) for id_, e in self.vectors.items()),
+            key=lambda t: t[1],
+        )
+        return [
+            type("VH", (), {
+                "doc_id": e["doc_id"], "page": e["page"],
+                "image_path": e["image_path"], "id": vid, "distance": dist,
+            })()
+            for vid, dist, e in scored[:k]
+        ]
+
+    # -- test-only simulation helpers -------------------------------------
+
+    def drop_vector(self, doc_id, page):
+        for vid, e in list(self.vectors.items()):
+            if e["doc_id"] == doc_id and e["page"] == page:
+                del self.vectors[vid]
+                return vid
+        return None
+
+    def embed(self, image: "Image.Image") -> list[float]:
+        self.embed_calls += 1
+        # purely content-derived vector: identical pages -> identical vec
+        # (distance 0), different pages -> clearly separated (distance > 0.1)
+        px = image.convert("L").resize((8, 8)).tobytes()
+        v = [b + 1.0 for b in px]
+        norm = math.sqrt(sum(x * x for x in v)) or 1.0
+        return [x / norm for x in v]
+
+
+def _cosine_dist(a, b):
+    if not a or not b or len(a) != len(b):
+        return 2.0
+    dot = sum(x * y for x, y in zip(a, b))
+    na = math.sqrt(sum(x * x for x in a)) or 1.0
+    nb = math.sqrt(sum(x * x for x in b)) or 1.0
+    return 1.0 - dot / (na * nb)
+
+
+# --------------------------------------------------------------------------
+# fixtures
+# --------------------------------------------------------------------------
+
+def make_pdf(path: Path, pages: int = 2) -> Path:
+    d = pymupdf.open()
+    for i in range(pages):
+        pg = d.new_page()
+        if i == 1:
+            # clearly distinct visual content (fills most of the page)
+            pg.draw_rect(pymupdf.Rect(60, 60, 520, 560),
+                         color=(0.1, 0.3, 0.9), fill=(0.1, 0.3, 0.9))
+        pg.insert_text((72, 72),
+                       f"Free cash flow = OCF - capex ({i})")
+    d.save(str(path))
+    d.close()
+    return path
+
+
+def build_env(tmp_path):
+    store = DocumentStore(root=tmp_path / "data")
+    src = make_pdf(tmp_path / "deck.pdf")
+    rec = store.add(src)
+    from app.parse import parse_file
+    parse_file(store.corpus_path(rec.doc_id), rec.doc_id,
+               store.artifacts_dir / rec.doc_id)
+    backend = ChromaLikeBackend()
+    state = VisualState(tmp_path / "vs.json")
+    visual = VisualIndexer(backend, backend.embed, store, state=state)
+    indexer = CorpusIndexer(store, embedder=FakeEmbedder(),
+                            persist_dir=tmp_path / "db", visual=visual)
+    return store, rec, indexer, backend
+
+
+def manifest_pages(store, doc_id):
+    m = store.artifacts_dir / doc_id / "manifest.json"
+    return json.loads(m.read_text(encoding="utf-8")).get("pages", [])
+
+
+# --------------------------------------------------------------------------
+# A. state exists, vector lost -> detected + repaired (only the lost one)
+# --------------------------------------------------------------------------
+
+def test_lost_vector_detected_and_repaired(tmp_path):
+    store, rec, indexer, backend = build_env(tmp_path)
+    indexer.index_document(rec.doc_id)
+    pages = manifest_pages(store, rec.doc_id)
+    assert backend.count() == len(pages)
+
+    # SIMULATE partial collection loss: page 1's vector vanishes while
+    # the image + manifest + state stay unchanged
+    backend.drop_vector(rec.doc_id, 1)
+    assert backend.count() == len(pages) - 1
+
+    embeds_before = backend.embed_calls
+    stats = indexer.reconcile()           # normal restart flow
+    assert stats.visual_repaired == 1     # exactly the lost page restored
+    assert backend.count() == len(pages)
+    # one verification embed for the lost page (present ones verified too:
+    # page 2 embedded for verification + skipped, page 1 embedded + re-added)
+    assert backend.embed_calls == embeds_before + len(pages)
+    # metadata preserved: same doc/page/path as the manifest
+    repaired = [e for e in backend.vectors.values()
+                if e["doc_id"] == rec.doc_id and e["page"] == 1]
+    assert len(repaired) == 1
+    assert repaired[0]["image_path"] == pages[0]["image_path"]
+
+
+def test_no_vector_loss_means_zero_embeddings(tmp_path):
+    store, rec, indexer, backend = build_env(tmp_path)
+    indexer.index_document(rec.doc_id)
+    embeds = backend.embed_calls
+    stats = indexer.reconcile()
+    assert stats.visual_repaired == 0
+    assert backend.embed_calls == embeds     # integrity gate passed cheaply
+    assert any("already indexed" in s for s in stats.visual_skipped)
+
+
+def test_repair_reports_backend_without_inspection_interface(tmp_path):
+    """Documented limitation: a backend with no query_embedding/count gets
+    a clear 'integrity check unavailable' report, never fake success."""
+    store, rec, indexer, backend = build_env(tmp_path)
+    indexer.index_document(rec.doc_id)
+    backend.drop_vector(rec.doc_id, 1)
+
+    class OpaqueBackend(ChromaLikeBackend):  # hide public inspection
+        count = None
+        query_embedding = None
+
+    indexer.visual.backend = OpaqueBackend()
+    indexer.visual.backend.vectors = backend.vectors
+    indexer.visual.backend.embed_calls = backend.embed_calls
+    stats = indexer.reconcile()
+    assert any("integrity check unavailable" in f for f in stats.visual_failed)
+
+
+# --------------------------------------------------------------------------
+# B. failed deletion -> durable pending retry across restart
+# --------------------------------------------------------------------------
+
+def test_failed_visual_deletion_retried_after_restart(tmp_path):
+    store, rec, indexer, backend = build_env(tmp_path)
+    indexer.register_hooks()
+    indexer.index_document(rec.doc_id)
+
+    # initial failure: ChromaDB down while the document is removed
+    backend.fail_remove = True
+    store.remove(rec.doc_id)               # text purge must still succeed
+    assert indexer.keyword.size == 0
+    assert indexer.vector.stored_doc_ids() == set()
+    assert backend.count() == 2             # stale vectors SURVIVED
+    assert rec.doc_id in indexer.visual.state.pending_doc_ids()
+
+    # restart simulation: fresh process, same persisted state file
+    reloaded = VisualState(tmp_path / "vs.json")
+    assert reloaded.pending_doc_ids() == [rec.doc_id]  # durable across restart
+    visual2 = VisualIndexer(backend, backend.embed, store, state=reloaded)
+    indexer2 = CorpusIndexer(store, embedder=FakeEmbedder(),
+                             persist_dir=tmp_path / "db", visual=visual2)
+
+    # service still down -> retry fails loudly, nothing silently dropped
+    stats = indexer2.reconcile()
+    assert any("pending visual purge still failing" in f
+               for f in stats.visual_failed)
+    assert rec.doc_id in reloaded.pending_doc_ids()
+    assert backend.count() == 2
+
+    # service recovers -> next run retries and completes the purge
+    backend.fail_remove = False
+    stats = indexer2.reconcile()
+    assert rec.doc_id not in reloaded.pending_doc_ids()
+    assert backend.count() == 0
+    assert rec.doc_id not in reloaded.doc_ids()
+
+
+def test_pending_purge_is_idempotent(tmp_path):
+    store, rec, indexer, backend = build_env(tmp_path)
+    indexer.register_hooks()
+    indexer.index_document(rec.doc_id)
+    backend.fail_remove = True
+    store.remove(rec.doc_id)
+    backend.fail_remove = False
+    # two successful reconciles: second is a no-op, no crash, no re-add
+    indexer.reconcile()
+    indexer.reconcile()
+    assert backend.count() == 0
+    assert indexer.visual.state.pending_doc_ids() == []
+
+
+def test_deleted_doc_never_returned_as_evidence(tmp_path):
+    """Stale backend vectors for a deleted doc must never reach users."""
+    store, rec, indexer, backend = build_env(tmp_path)
+    indexer.register_hooks()
+    indexer.index_document(rec.doc_id)
+    backend.fail_remove = True
+    store.remove(rec.doc_id)               # stale vectors remain in backend
+
+    from app.retrieval import retrieve
+
+    outcome = retrieve(
+        "cash flow", keyword=KeywordIndex(), vector=None, store=store,
+        visual_source=backend, text_to_visual_embedder=backend.embed,
+        top_k=5,
+    )
+    assert all(i.doc_id != rec.doc_id for i in outcome.visual_items)
+    assert all(i.doc_id != rec.doc_id for i in outcome.evidence.items)
+
+
+# --------------------------------------------------------------------------
+# C. interrupted indexing resumes; state corruption is surfaced
+# --------------------------------------------------------------------------
+
+def test_interrupted_visual_indexing_resumes(tmp_path):
+    store, rec, indexer, backend = build_env(tmp_path)
+    # fail the embed for the SECOND page only
+    backend.add_fail_on_n = 1
+    stats = indexer.index_document(rec.doc_id)
+    assert stats.visual_pages == 1
+    assert len(stats.visual_failed) == 1
+    # state persisted only the successful page
+    state = indexer.visual.state.get(rec.doc_id)
+    assert set(state) == {"1"}
+
+    # restart + repair: only page 2 is embedded, page 1 untouched
+    reloaded = VisualState(tmp_path / "vs.json")
+    indexer2 = CorpusIndexer(
+        store, embedder=FakeEmbedder(), persist_dir=tmp_path / "db",
+        visual=VisualIndexer(backend, backend.embed, store, state=reloaded),
+    )
+    backend.add_fail_on_n = None
+    embeds = backend.embed_calls
+    stats2 = indexer2.index_document(rec.doc_id)
+    assert backend.embed_calls == embeds + 1      # exactly the missing page
+    assert stats2.visual_pages == 1
+    assert set(reloaded.get(rec.doc_id)) == {"1", "2"}
+
+
+def test_corrupted_state_file_surfaces_hint(tmp_path):
+    store, rec, indexer, backend = build_env(tmp_path)
+    indexer.index_document(rec.doc_id)
+    # corrupt the persisted state file
+    (tmp_path / "vs.json").write_text("{not json", encoding="utf-8")
+    state = VisualState(tmp_path / "vs.json")
+    assert state.corrupted is True
+    visual = VisualIndexer(backend, backend.embed, store, state=state)
+    stats = CorpusIndexer(
+        store, embedder=FakeEmbedder(), persist_dir=tmp_path / "db",
+        visual=visual,
+    ).reconcile()
+    assert any("visual-backfill" in f for f in stats.visual_failed)
+
+
+def test_legacy_state_file_still_read(tmp_path):
+    store, rec, indexer, backend = build_env(tmp_path)
+    indexer.index_document(rec.doc_id)
+    old = json.loads((tmp_path / "vs.json").read_text(encoding="utf-8"))
+    (tmp_path / "vs.json").write_text(
+        json.dumps(old["docs"]), encoding="utf-8")  # legacy flat layout
+    state = VisualState(tmp_path / "vs.json")
+    assert state.corrupted is False
+    assert set(state.get(rec.doc_id)) == {"1", "2"}
+
+
+# --------------------------------------------------------------------------
+# D. explicit --visual-backfill with no visual index -> honest non-zero exit
+# --------------------------------------------------------------------------
+
+def test_backfill_unavailable_exits_nonzero(tmp_path, monkeypatch, capsys):
+    import app.visual as visual_mod
+
+    monkeypatch.setattr(
+        visual_mod, "production_visual_indexer",
+        lambda store: (None, "app.visual_index not available (PR #11 unmerged)"),
+    )
+    import app.indexing as indexing_mod
+
+    real_ds = DocumentStore
+
+    class FakeDS(real_ds):
+        def __init__(self, *a, **k):
+            super().__init__(root=tmp_path / "ds")
+
+    monkeypatch.setattr(indexing_mod, "DocumentStore", FakeDS)
+    rc = indexing_main(["--visual-backfill"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "--visual-backfill" in err and "NOT performed" in err

@@ -88,11 +88,35 @@ assert idx.count() == 3
 removed = idx.remove_doc("doc-9")
 assert removed == 3 and idx.count() == 0
 
+# ---- integrity scenario: collection loss + repair via PUBLIC API -------
+idx2 = VisualIndex(root / "i2", embedder=emb)
+ids2 = [idx2.add_image("doc-a", n, p) for n, p in enumerate(paths, start=1)]
+assert idx2.count() == 3
+# simulate partial collection loss (TEST HARNESS ONLY: direct Chroma delete;
+# the app code itself never touches the private collection)
+lost = ids2[0]
+idx2._collection.delete(ids=[lost])
+assert idx2.count() == 2
+# repair through the public interface, exactly as app/visual.py does:
+# embed the page -> query k=1 -> distance > eps => vector lost -> re-add
+restored = 0
+for n, p in enumerate(paths, start=1):
+    vec = emb(Image.open(p))
+    top = idx2.query_embedding(vec, k=1)
+    if not top or top[0].distance > 0.05:
+        idx2.add_image("doc-a", n, p, embedding=vec)
+        restored += 1
+assert restored == 1 and idx2.count() == 3
+verify = idx2.query_embedding(emb(Image.open(paths[0])), k=1)
+assert verify[0].page == 1 and verify[0].distance <= 0.05
+
 print(json.dumps({
     "pages": [h.page for h in hits],
     "text_page": thits[0].page,
     "stable_id": same == ids[0],
     "removed": removed,
+    "lost_repaired": restored,
+    "post_repair_self_distance": round(verify[0].distance, 6),
 }))
 """
 
@@ -113,3 +137,7 @@ def test_real_visual_index_class_with_fake_embeddings():
     assert data["text_page"] == 3       # text bridge: page 3 first
     assert data["stable_id"] is True    # content-addressed image id stable
     assert data["removed"] == 3         # remove_doc purged everything
+    # integrity scenario on her REAL class: lost vector detected via the
+    # public count()/query_embedding() API and re-added, distance ~0
+    assert data["lost_repaired"] == 1
+    assert data["post_repair_self_distance"] <= 0.05
