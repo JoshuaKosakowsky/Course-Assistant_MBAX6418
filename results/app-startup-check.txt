@@ -1,0 +1,21 @@
+Startup verification (Issue #2, Step 5; log cleaned 2026-10-16)
+===============================================================
+
+Command:        python -m app.ui   (production indexing wiring)
+Environment:    Windows, local .env with class keys, LibreOffice absent
+Result:         boot complete, HTTP 200 on http://127.0.0.1:7860/
+
+Captured startup output (progress-bar noise and CR bytes removed;
+the only lines the boot printed):
+
+    Semantic search: using 'nvidia/Nemotron-3-Embed-1B-BF16' at http://dobolyi.com:9002/v1
+    * Running on local URL:  http://127.0.0.1:7860
+    * To create a public link, set `share=True` in `launch()`.
+
+Verified behaviors:
+- Hooks registered (removal purges BM25 + Chroma text vectors).
+- Reconcile rebuilt the in-memory BM25 index from library + artifacts.
+- Existing ChromaDB vectors preserved: ZERO embedding requests during
+  startup (missing-vector repair only; nothing to repair).
+- Text-only mode applies when embedding credentials/service are
+  unavailable (fake embedders are never used in production).
