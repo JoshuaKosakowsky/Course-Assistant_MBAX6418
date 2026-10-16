@@ -25,11 +25,14 @@ Status legend: `pending` (not started) · `in progress` · `done`.
 - [x] Document management (Task 1): add with content dedup (sha256), list,
       remove with cascade delete of corpus copy + artifacts + record;
       removal hooks for future indexes (app/documents.py)
-- [ ] PPTX conversion verified with LibreOffice installed (dev machines lack
-      it; manual-export workaround documented) — **unverified**
-- [ ] Sample corpus in `data/` (gitignored): syllabus + at least one slide
-      deck from Canvas
-- [ ] CLI/script: `python -m app.ingest <file>` -> verified text + images
+- [x] PPTX conversion verified with LibreOffice 26.8.1 on five
+      representative lecture decks: 145 slides converted; every slide yielded
+      non-empty text and a 150 dpi PNG; embedded-image counts recorded
+- [x] Sample corpus in `data/` (gitignored): syllabus + five course slide PDFs
+      from Canvas; parsed 152 pages, all with extracted text and 150 dpi PNGs;
+      first-page visual spot-check confirmed intact layouts
+- [x] CLI: `python -m app.ingest <file>` adds and parses one PDF/PPTX,
+      reports the manifest, and rejects unsupported formats helpfully
 - [x] Gradio material-management UI (add/remove/list via the app, `python -m
       app.ui`; dedup handled by the store) — Task 1 complete
 
