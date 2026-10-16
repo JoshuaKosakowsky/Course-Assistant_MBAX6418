@@ -71,6 +71,27 @@ def _extract_json(raw: str) -> object:
     raise QnaParseError("unbalanced JSON object in model output")
 
 
+def coerce_bool(value: object) -> bool:
+    """Strictly validate a JSON boolean field.
+
+    ``bool("false")`` is ``True``, so strings must be checked explicitly.
+    Missing/invalid values raise :class:`QnaParseError` so callers fail
+    conservatively (retry or fall back) instead of misinterpreting input.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        low = value.strip().lower()
+        if low in ("true", "1", "yes"):
+            return True
+        if low in ("false", "0", "no"):
+            return False
+        raise QnaParseError(f"invalid boolean value: {value!r}")
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    raise QnaParseError(f"invalid boolean value: {value!r}")
+
+
 def _coerce_page(value: object) -> int:
     if isinstance(value, bool):
         raise QnaParseError(f"invalid page value: {value!r}")
@@ -130,4 +151,4 @@ def parse_answer(raw: str) -> ParsedAnswer:
         )
 
     grounded = obj.get("grounded", True)
-    return ParsedAnswer(answer=answer.strip(), sources=tuple(sources), grounded=bool(grounded))
+    return ParsedAnswer(answer=answer.strip(), sources=tuple(sources), grounded=coerce_bool(grounded))
