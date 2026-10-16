@@ -103,6 +103,35 @@ def test_query_text_bridge_with_injected_text_embedder(index_factory, tmp_path):
     assert hits2 and hits2[0].page == 2
 
 
+def test_query_text_defaults_to_visual_space_embedder(monkeypatch, tmp_path):
+    """Regression: the text-to-image bridge must embed text with the SAME
+    visual model/endpoint as images (embed_text_visual), never the separate
+    port-9002 text-embedding space."""
+
+    import app.visual_index as vi_mod
+
+    calls = {}
+
+    class FakeClient:
+        def embed_text_visual(self, text):
+            calls["method"] = "embed_text_visual"
+            return [0.1, 0.2]
+
+        def embed_text(self, text):
+            calls["method"] = "embed_text"  # must never be reached
+            return [0.9, 0.9]
+
+    monkeypatch.setattr(vi_mod, "ClassEmbeddingClient", lambda: FakeClient())
+
+    idx = VisualIndex(root=tmp_path / "idx")  # no embedder injected: real default path
+    img = make_image(tmp_path / "p1.png", (10, 10, 10))
+    idx.add_image("docA", 1, img, embedding=[0.1, 0.2])
+
+    hits = idx.query_text("some diagram topic")
+    assert calls.get("method") == "embed_text_visual"
+    assert hits and hits[0].doc_id == "docA"
+
+
 def test_query_empty_index_returns_empty(index_factory):
     idx = index_factory()
     assert idx.query_embedding([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]) == []

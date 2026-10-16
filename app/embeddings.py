@@ -51,6 +51,26 @@ def image_to_data_uri(image: Image.Image) -> str:
     return f"data:{mime};base64," + base64.b64encode(buf.getvalue()).decode("ascii")
 
 
+EMBED_IMAGE_MAX_EDGE = 512
+
+
+def resize_for_embedding(image: Image.Image, max_edge: int = EMBED_IMAGE_MAX_EDGE) -> Image.Image:
+    """Return a copy downscaled to at most ``max_edge`` on the longest side.
+
+    The embedding endpoint rejects images above its context limit (150-dpi
+    page/slide renders exceed it). The original image and its stored path
+    are never modified — this copy exists only for the embedding request.
+    Images already within the limit are returned as-is.
+    """
+    width, height = image.size
+    longest = max(width, height)
+    if longest <= max_edge:
+        return image
+    scale = max_edge / longest
+    new_size = (max(1, round(width * scale)), max(1, round(height * scale)))
+    return image.convert("RGB").resize(new_size, Image.Resampling.LANCZOS)
+
+
 class ClassEmbeddingClient:
     """OpenAI-compatible embeddings client for the class endpoints.
 
@@ -69,14 +89,35 @@ class ClassEmbeddingClient:
             )
 
     def embed_image(self, image: Image.Image) -> list[float]:
-        """Embed one page/slide image via the class visual endpoint."""
-        return self._embed([image_to_data_uri(image)], VISUAL_EMBED_MODEL)
+        """Embed one page/slide image via the class visual endpoint.
+
+        The image is downscaled (512px longest edge) for the embedding
+        request; the caller's original file is never modified.
+        """
+        if not VISUAL_EMBED_MODEL:
+            raise RuntimeError("Set VISUAL_EMBED_MODEL in .env (see .env.example).")
+        return self._embed([image_to_data_uri(resize_for_embedding(image))], VISUAL_EMBED_MODEL)
+
+    def embed_text_visual(self, text: str) -> list[float]:
+        """Embed free text in the SAME space as images (Qwen3-VL, port 9003).
+
+        Required for the text-to-image bridge: only vectors produced by the
+        same model/endpoint are comparable against the visual index.
+        """
+        if not VISUAL_EMBED_MODEL:
+            raise RuntimeError("Set VISUAL_EMBED_MODEL in .env for the text-to-image bridge.")
+        return self._embed([text], VISUAL_EMBED_MODEL)
 
     def embed_text(self, text: str) -> list[float]:
-        """Embed free text via the class text-embedding endpoint (bridge)."""
+        """Embed free text with the TEXT-embedding model (port 9002).
+
+        This is the text-index space (issue #2) — NOT comparable with the
+        visual index. For the text-to-image bridge use
+        :meth:`embed_text_visual` with the visual model instead.
+        """
         if not TEXT_EMBED_MODEL:
             raise RuntimeError(
-                "Set TEXT_EMBED_MODEL in .env for the text-to-image bridge."
+                "Set TEXT_EMBED_MODEL in .env for text-space embeddings."
             )
         return self._embed([text], TEXT_EMBED_MODEL, base=TEXT_EMBED_BASE_URL)
 

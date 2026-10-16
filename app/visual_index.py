@@ -122,10 +122,15 @@ class VisualIndex:
         return self.query_embedding(self._get_embedder()(image), k=k)
 
     def query_text(self, text: str, k: int = 5, text_embedder: TextEmbedder | None = None) -> list[VisualHit]:
-        """Text-to-image bridge: embed free text, then search the visual index."""
+        """Text-to-image bridge: embed free text, then search the visual index.
+
+        The default embedder is the SAME visual model/endpoint used for
+        images (Qwen3-VL, port 9003). Mixing in the separate port-9002 text
+        embedding space would return nonsense hits even at equal dimensions.
+        """
         embed_text = text_embedder or self._text_embedder
         if embed_text is None:
-            embed_text = ClassEmbeddingClient().embed_text
+            embed_text = ClassEmbeddingClient().embed_text_visual
         return self.query_embedding(embed_text(text), k=k)
 
     def query_embedding(self, embedding: list[float], k: int = 5) -> list[VisualHit]:
