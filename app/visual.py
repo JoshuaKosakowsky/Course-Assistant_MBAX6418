@@ -306,6 +306,12 @@ class VisualIndexer:
             stats.errors.append(f"{doc_id}: {exc}")
             return stats
         pages = self._manifest_pages(doc)
+        problem = self._manifest_problem(doc)
+        if problem is not None:
+            # unreadable metadata is NOT 'zero pages': preserve vectors
+            # and retryable state, never purge on a transient read failure
+            stats.visual_failed.append(problem)
+            return stats
         if not pages:
             stats.visual_skipped.append(f"{doc_id}: no page images in manifest")
             # never abandon searchable old vectors: purge them (durably
@@ -368,6 +374,11 @@ class VisualIndexer:
             stats.errors.append(f"{doc_id}: {exc}")
             return stats
         pages = self._manifest_pages(doc)
+        problem = self._manifest_problem(doc)
+        if problem is not None:
+            # never evict/degrade based on temporarily unreadable metadata
+            stats.visual_failed.append(problem)
+            return stats
         if not pages:
             stats.visual_skipped.append(f"{doc_id}: no page images in manifest")
             # purge stale vectors; on backend failure the tracking entry
@@ -606,6 +617,12 @@ class VisualIndexer:
                 stats += self.replace_document(doc.doc_id)
                 continue
             pages = self._manifest_pages(doc)
+            problem = self._manifest_problem(doc)
+            if problem is not None:
+                # metadata temporarily unavailable: preserve vectors/state
+                # and let a later run continue (never a destructive purge)
+                stats.visual_failed.append(problem)
+                continue
             state = self.state.get(doc.doc_id)
             if not state:
                 stats.visual_skipped.append(
@@ -866,11 +883,44 @@ class VisualIndexer:
         manifest = self.store.artifacts_dir / doc.doc_id / "manifest.json"
         if not manifest.is_file():
             return []
-        raw = json.loads(manifest.read_text(encoding="utf-8"))
-        return [
-            (int(p.get("number", 0)), str(p.get("image_path", "") or ""))
-            for p in raw.get("pages", [])
-        ]
+        try:
+            raw = json.loads(manifest.read_text(encoding="utf-8"))
+        except Exception:
+            return []
+        pages = raw.get("pages", []) if isinstance(raw, dict) else []
+        out: List[Tuple[int, str]] = []
+        for p in pages:
+            try:
+                out.append((int(p["number"]), str(p["image_path"])))
+            except (KeyError, TypeError, ValueError):
+                continue
+        return out
+
+    def _manifest_problem(self, doc) -> Optional[str]:
+        """None when the manifest is valid (with any page count), else a
+        reason. A MISSING or UNREADABLE manifest is NOT proof that a
+        document intentionally has zero pages — callers must preserve
+        existing vectors and retryable state in that case and never purge
+        solely because metadata is temporarily unavailable."""
+        manifest = self.store.artifacts_dir / doc.doc_id / "manifest.json"
+        if not manifest.is_file():
+            return (
+                f"{doc.doc_id}: manifest missing — metadata temporarily "
+                f"unavailable; existing visual vectors preserved (no purge)"
+            )
+        try:
+            raw = json.loads(manifest.read_text(encoding="utf-8"))
+        except Exception:
+            return (
+                f"{doc.doc_id}: manifest corrupt/unreadable — existing "
+                f"visual vectors preserved (no purge)"
+            )
+        if not isinstance(raw, dict) or "pages" not in raw:
+            return (
+                f"{doc.doc_id}: manifest has no 'pages' record — existing "
+                f"visual vectors preserved (no purge)"
+            )
+        return None
 
 
 def _stat_matches(entry: object | None, path: Path) -> bool:

@@ -936,3 +936,85 @@ def test_direct_index_document_clears_stale_pending_marker(tmp_path):
     assert len(backend.vectors) == 2
     assert rec2.doc_id not in indexer.visual.state.pending_doc_ids()
     assert rec2.doc_id not in indexer.visual.state.replacement_failed_docs()
+
+
+
+# --------------------------------------------------------------------------
+# ROUND 4 (finding 4): a MISSING or CORRUPT manifest is NOT 'zero pages' —
+# vectors and state must be preserved, and recovery works once the
+# manifest returns
+# --------------------------------------------------------------------------
+
+def _manifest_path(store, doc_id):
+    return store.artifacts_dir / doc_id / "manifest.json"
+
+
+def test_missing_manifest_preserves_vectors_via_index_document(tmp_path):
+    store, rec, indexer, backend = build_env(tmp_path)
+    indexer.index_document(rec.doc_id)
+    ids1 = set(backend.vectors)
+    _manifest_path(store, rec.doc_id).unlink()
+
+    stats = indexer.visual.index_document(rec.doc_id)
+    assert any("manifest missing" in f for f in stats.visual_failed)
+    assert set(backend.vectors) == ids1                  # nothing deleted
+    assert len(indexer.visual.state.get(rec.doc_id)) == 2  # state preserved
+
+
+def test_missing_manifest_preserves_vectors_via_reconcile(tmp_path):
+    store, rec, indexer, backend = build_env(tmp_path)
+    indexer.index_document(rec.doc_id)
+    ids1 = set(backend.vectors)
+    _manifest_path(store, rec.doc_id).unlink()
+
+    stats = indexer.visual.reconcile()
+    assert any("manifest missing" in f for f in stats.visual_failed)
+    assert set(backend.vectors) == ids1
+    assert len(indexer.visual.state.get(rec.doc_id)) == 2
+
+
+def test_corrupt_manifest_preserves_vectors(tmp_path):
+    store, rec, indexer, backend = build_env(tmp_path)
+    indexer.index_document(rec.doc_id)
+    ids1 = set(backend.vectors)
+    _manifest_path(store, rec.doc_id).write_text("{ not json", encoding="utf-8")
+
+    stats = indexer.visual.index_document(rec.doc_id)
+    assert any("corrupt" in f for f in stats.visual_failed)
+    assert set(backend.vectors) == ids1
+    assert len(indexer.visual.state.get(rec.doc_id)) == 2
+
+    stats2 = indexer.visual.reconcile()
+    assert any("corrupt" in f for f in stats2.visual_failed)
+    assert set(backend.vectors) == ids1                 # reconcile too
+
+
+def test_recovery_after_manifest_restored(tmp_path):
+    store, rec, indexer, backend = build_env(tmp_path)
+    indexer.index_document(rec.doc_id)
+    mp = _manifest_path(store, rec.doc_id)
+    original = mp.read_text(encoding="utf-8")
+    mp.write_text("{ broken", encoding="utf-8")
+    assert indexer.visual.reconcile().visual_failed     # blocked, preserved
+    assert len(backend.vectors) == 2
+
+    mp.write_text(original, encoding="utf-8")           # metadata returns
+    stats = indexer.visual.reconcile()
+    assert not stats.visual_failed
+    assert len(backend.vectors) == 2
+    assert len(indexer.visual.state.get(rec.doc_id)) == 2
+
+
+def test_valid_zero_page_manifest_still_purges(tmp_path):
+    """Finding-4 guard kept: an INTENTIONAL empty manifest (valid JSON
+    with pages: []) still purges — only unreadable metadata preserves."""
+    store, rec, indexer, backend = build_env(tmp_path)
+    indexer.index_document(rec.doc_id)
+    assert len(backend.vectors) == 2
+    raw = json.loads(_manifest_path(store, rec.doc_id).read_text(encoding="utf-8"))
+    raw["pages"] = []
+    _manifest_path(store, rec.doc_id).write_text(json.dumps(raw), encoding="utf-8")
+    stats = indexer.visual.reconcile()
+    assert not stats.visual_failed
+    assert len(backend.vectors) == 0
+    assert rec.doc_id not in indexer.visual.state.doc_ids()
