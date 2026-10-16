@@ -23,6 +23,8 @@ import pandas as pd
 
 from .config import APP_HOST, APP_PORT
 from .documents import DocumentNotFoundError, DocumentStore
+from .embeddings import EmbeddingsError, TextEmbeddingClient
+from .indexing import CorpusIndexer
 from .parse import ConversionError, parse_file
 
 SUPPORTED_LABEL = (
@@ -64,8 +66,15 @@ def _choices(store: DocumentStore) -> list[tuple[str, str]]:
     return [(doc.filename, doc.doc_id) for doc in store.list()]
 
 
-def add_file(store: DocumentStore, file) -> tuple[pd.DataFrame, list, str]:
-    """Add + parse an uploaded file; returns (library table, dropdown, status)."""
+def add_file(
+    store: DocumentStore, file, indexer=None
+) -> tuple[pd.DataFrame, list, str]:
+    """Add + parse an uploaded file; returns (library table, dropdown, status).
+
+    ``indexer`` is optional (app.indexing.CorpusIndexer): when provided,
+    a successfully parsed document is indexed immediately, and the status
+    reports the chunk counts or the reason indexing was not possible.
+    """
     path = _file_path(file)
     if not path:
         return _library_df(store), _choices(store), "Choose a file to upload first."
@@ -84,10 +93,12 @@ def add_file(store: DocumentStore, file) -> tuple[pd.DataFrame, list, str]:
             f"'{doc.filename}' is already in the library — no duplicate added.",
         )
 
+    parsed_ok = False
     try:
         result = parse_file(
             store.corpus_path(doc.doc_id), doc.doc_id, store.artifacts_dir / doc.doc_id
         )
+        parsed_ok = True
         note = f"Added '{doc.filename}' · parsed {len(result.pages)} page(s)."
         if result.converted_from:
             note += " (converted from PPTX)"
@@ -95,6 +106,20 @@ def add_file(store: DocumentStore, file) -> tuple[pd.DataFrame, list, str]:
         note = f"Added '{doc.filename}', but parsing needs LibreOffice: {exc}"
     except Exception as exc:  # pragma: no cover - upstream failure surface
         note = f"Added '{doc.filename}', but parsing failed: {exc}"
+
+    if indexer is not None and parsed_ok:
+        try:
+            stats = indexer.index_document(doc.doc_id)
+            note += f" · indexed {stats.chunks} chunk(s)"
+            if stats.skipped:
+                if indexer.embedder is None:
+                    note += " · vectors skipped (keyword-only mode: no embedding configured)"
+                else:
+                    note += " · vectors skipped (embedding service unavailable)"
+            if stats.errors:
+                note += " · indexing errors (see application log)"
+        except Exception as exc:
+            note += f" · indexing failed: {exc}"
 
     return _library_df(store), _choices(store), note
 
@@ -114,8 +139,16 @@ def remove_selected(store: DocumentStore, choice: str | None) -> tuple[pd.DataFr
     return _library_df(store), _choices(store), message
 
 
-def build_ui(store: DocumentStore | None = None) -> gr.Blocks:
+def build_ui(store: DocumentStore | None = None, indexer=None) -> gr.Blocks:
     store = store or DocumentStore()
+    if indexer is not None:
+        # Real application wiring: removals purge both indexes; startup
+        # reconciles BM25 + ChromaDB with the library (offline-safe).
+        indexer.register_hooks()
+        try:
+            indexer.reconcile()
+        except Exception as exc:  # pragma: no cover - never block startup
+            print(f"index reconciliation failed: {exc}")
     with gr.Blocks(title="Course Assistant — Manage Materials") as demo:
         gr.Markdown("# Course Assistant — Manage Course Materials")
         gr.Markdown(SUPPORTED_LABEL)
@@ -140,7 +173,7 @@ def build_ui(store: DocumentStore | None = None) -> gr.Blocks:
         status = gr.Markdown("Ready.")
 
         add_button.click(
-            lambda f, store=store: add_file(store, f),
+            lambda f, store=store, indexer=indexer: add_file(store, f, indexer),
             inputs=[file_input],
             outputs=[library_table, document_dropdown, status],
             api_name="add_file",
@@ -159,5 +192,26 @@ def build_ui(store: DocumentStore | None = None) -> gr.Blocks:
     return demo
 
 
+def _production_indexer() -> tuple[DocumentStore, CorpusIndexer]:
+    """Production startup wiring for ``python -m app.ui``.
+
+    Builds the real embedding client from the local .env; when credentials
+    are missing or the service is down, the app degrades to keyword-only
+    mode (BM25 still works) and never substitutes a fake embedder.
+    """
+    store = DocumentStore()
+    embedder = None
+    try:
+        embedder = TextEmbeddingClient()
+        print(f"Semantic search: using {embedder.model!r} at {embedder.base_url}")
+    except EmbeddingsError as exc:
+        print(f"Keyword-only mode (semantic search disabled): {exc}")
+    indexer = CorpusIndexer(store, embedder=embedder)
+    return store, indexer
+
+
 if __name__ == "__main__":
-    build_ui().launch(server_name=APP_HOST, server_port=APP_PORT, inbrowser=False)
+    store, indexer = _production_indexer()
+    build_ui(store, indexer).launch(
+        server_name=APP_HOST, server_port=APP_PORT, inbrowser=False
+    )

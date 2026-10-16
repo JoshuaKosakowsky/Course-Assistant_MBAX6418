@@ -1,0 +1,43 @@
+==============================================================================
+Semantic retrieval (ChromaDB + class embeddings) — Issue #2 demo
+==============================================================================
+
+SECTION A — Fake embeddings (mechanics check, NOT semantics)
+  FakeEmbedder = deterministic bag-of-words hash vectors. This section
+  proves wiring/ranking/filter/delete behave; it says nothing about how
+  well retrieval actually matches meaning.
+  indexed 3 chunks in collection 'course_text_chunks'
+  search('warehouse flow', top_k=2) -> [('doc-finance::p0001::c000', 0.34), ('doc-ops::p0001::c000', 0.183)]
+  same query, doc_ids=['doc-ops'] -> ['doc-ops::p0001::c000']
+  same query, doc_ids=['doc-finance'] -> ['doc-finance::p0001::c000']
+  remove_document('doc-marketing') removed 1; count now 2
+
+SECTION B — Real class embeddings (port 9002, Nemotron-3-Embed-1B-BF16)
+  live endpoint OK: 3 vectors, dim 2048 (documented 2048)
+
+QUERY                                  BM25 top       Semantic top   verdict
+------------------------------------------------------------------------------
+'free cash flow'                       doc-finance    doc-finance    expected:doc-finance
+'inventory management'                 doc-ops        doc-ops        expected:doc-ops
+'company purchase price estimation'    (none)         doc-finance    expected:doc-finance
+'what is a firm worth'                 (none)         doc-ops        expected:doc-finance
+
+  Details for the paraphrase case (word overlap zero for BM25):
+  query 'company purchase price estimation'
+    BM25    -> (no matches)
+    semantic #1 -> doc-finance  score +0.7898  (Free cash flow equals operating cash flow min...)
+    semantic #2 -> doc-ops  score +0.7836  (Inventory management balances holding costs a...)
+    semantic #3 -> doc-marketing  score +0.7127  (Brand positioning defines how customers perce...)
+
+  Honest near-tie on 'what is a firm worth' (real model):
+    #1 -> doc-ops  score +0.6169
+    #2 -> doc-finance  score +0.6060
+    #3 -> doc-marketing  score +0.5476
+    The finance chunk is a close second — on this 1-chunk-per-doc corpus the
+    paraphrase is genuinely hard; the retrieval leg cannot resolve it alone.
+
+  Separation: collections after this demo: ['course_text_chunks']
+    (visual index is a later, separate collection per assignment requirement)
+
+Conclusion: embeddings retrieve by meaning where BM25 fails on vocabulary, but
+they are not magic — close paraphrases still need the reranker/fusion stage.
