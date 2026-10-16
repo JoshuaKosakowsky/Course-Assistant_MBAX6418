@@ -222,13 +222,16 @@ def test_index_directory_logs_counts(caplog, index_factory, tmp_path):
 
 
 def test_cli_fails_cleanly_without_endpoint_config(monkeypatch, tmp_path, capsys):
-    """Negative case: offline runs must fail loudly, not hang or crash."""
+    """Negative case: offline runs must fail loudly, not hang or crash.
+
+    Patches the module-level bindings the client actually reads, so the
+    test is env-independent: it simulates missing configuration even when
+    a real .env exists on the dev machine.
+    """
     import app.visual_embeddings as vem
     import app.visual_index as vi_mod
     import app.index_visual as cli
 
-    # Force the unconfigured state deterministically (a local .env with real
-    # keys must never let this test hit the network).
     monkeypatch.setattr(vem, "VISUAL_EMBED_API_KEY", "")
     monkeypatch.setattr(vem, "VISUAL_EMBED_MODEL", "")
     monkeypatch.setattr(vi_mod, "DATA_ROOT", tmp_path)
