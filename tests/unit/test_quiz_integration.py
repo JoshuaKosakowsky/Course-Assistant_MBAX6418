@@ -25,8 +25,16 @@ class Pack:
 
 def test_pack_converts_text_and_verified_image():
     ref, = evidence_from_pack(Pack([Item()]))
-    assert (ref.document, ref.page, ref.excerpt, ref.image_path) == (
-        "Week 5", 9, "BM25 matches exact terms", "artifacts/week5/page-009.png")
+    assert (ref.document, ref.page, ref.excerpt, ref.image_path, ref.doc_id) == (
+        "Week 5", 9, "BM25 matches exact terms", "artifacts/week5/page-009.png", "doc-five")
+
+
+def test_doc_id_is_preserved_and_missing_doc_id_normalizes_to_none():
+    ref, = evidence_from_pack(Pack([Item()]))
+    assert ref.doc_id == "doc-five"
+    legacy, = evidence_from_pack(Pack([Item(doc_id="  ")]))
+    assert legacy.doc_id is None
+    assert legacy.document == "Week 5"
 
 
 def test_unverified_image_is_never_exposed_as_quiz_evidence():

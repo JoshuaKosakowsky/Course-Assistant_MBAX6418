@@ -14,6 +14,7 @@ class Item:
     excerpt = "BM25 matches exact terms"
     image_path = None
     image_verified = False
+    doc_id = "week5"
 
 
 class Pack:
@@ -41,7 +42,7 @@ def _reveal_handler(session):
 
 
 def test_generate_event_shows_no_key_then_submit_returns_feedback():
-    session, view = _generate_handler(["Week 5"], "BM25", 1, 42)
+    session, view = _generate_handler(["week5"], "BM25", 1, 42)
     assert set(view) == {"completed", "questions"}
     assert set(view["questions"][0]) == {"prompt", "options"}
     assert "correct_index" not in str(view)
@@ -56,7 +57,7 @@ def test_generate_event_shows_no_key_then_submit_returns_feedback():
 
 
 def test_reveal_event_requires_explicit_action_and_prevents_late_submit():
-    session, view = _generate_handler(["Week 5"], None, 1, 42)
+    session, view = _generate_handler(["week5"], None, 1, 42)
     assert view["completed"] is False
     result = _reveal_handler(session)
     assert result["score"] is None
@@ -66,7 +67,7 @@ def test_reveal_event_requires_explicit_action_and_prevents_late_submit():
 
 
 def test_invalid_ui_submission_does_not_unlock_solutions():
-    session, _ = _generate_handler(["Week 5"], None, 1, 42)
+    session, _ = _generate_handler(["week5"], None, 1, 42)
     with pytest.raises(ValueError):
         _submit_handler(session, [])
     assert session.student_view()["completed"] is False

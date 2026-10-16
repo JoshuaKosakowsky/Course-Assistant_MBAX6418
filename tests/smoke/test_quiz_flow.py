@@ -9,8 +9,8 @@ pytestmark = pytest.mark.smoke
 
 def test_generate_answer_score_and_reveal_source():
     evidence = (EvidenceRef("Week 5", 9, excerpt="BM25 is keyword retrieval",
-                            image_path="artifacts/week5/page-009.png"),)
-    request = QuizRequest(("Week 5",), "BM25", 1, 2026)
+                            image_path="artifacts/week5/page-009.png", doc_id="week5"),)
+    request = QuizRequest(("week5",), "BM25", 1, 2026)
 
     def fake_generator(scoped, topic, count):
         assert scoped == evidence
@@ -38,8 +38,8 @@ def test_generate_answer_score_and_reveal_source():
 
 
 def test_regeneration_same_seed_keeps_answers_stable():
-    evidence = (EvidenceRef("Week 5", 9, excerpt="BM25 keyword retrieval"),)
-    request = QuizRequest(("Week 5",), None, 1, 2026)
+    evidence = (EvidenceRef("Week 5", 9, excerpt="BM25 keyword retrieval", doc_id="week5"),)
+    request = QuizRequest(("week5",), None, 1, 2026)
 
     def generator(items, topic, count):
         return [Question("Which matches words?", ("BM25", "OCR", "ASR", "Diffusion"),

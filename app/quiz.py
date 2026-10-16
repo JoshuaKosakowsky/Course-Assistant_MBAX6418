@@ -17,12 +17,15 @@ class EvidenceRef:
     page: int
     excerpt: str | None = None
     image_path: str | None = None
+    doc_id: str | None = None
 
     def __post_init__(self) -> None:
         if not self.document.strip() or isinstance(self.page, bool) or not isinstance(self.page, int) or self.page < 1:
             raise ValueError("evidence needs a document and positive page")
         if not (self.excerpt and self.excerpt.strip()) and not (self.image_path and self.image_path.strip()):
             raise ValueError("evidence needs an excerpt or image")
+        if self.doc_id is not None and (not isinstance(self.doc_id, str) or not self.doc_id.strip()):
+            raise ValueError("doc_id must be a non-empty string or None")
 
     def public(self) -> dict:
         return {"document": self.document, "page": self.page,

@@ -8,22 +8,28 @@ It belongs on Issue #6's `feat/quiz-engine` branch; Issue #7 owns the Gradio UI.
 
 Pass a vetted `EvidencePack`-like object to `evidence_from_pack(pack)` in
 `app/quiz_integration.py`. It reads `pack.items`: each entry exposes
-`filename`, `page_no`, `excerpt`, `image_path`, and `image_verified` (the
-`EvidenceItem` fields in PR #15). The result is a tuple of `EvidenceRef`:
-`document`, `page`, `excerpt`, `image_path`.
+`doc_id`, `filename`, `page_no`, `excerpt`, `image_path`, and
+`image_verified` (the `EvidenceItem` fields in PR #15). The result is a
+tuple of `EvidenceRef`:
+`document` (filename, display-only), `page`, `excerpt`, `image_path`,
+`doc_id` (unique document identity).
 
 - Carry text excerpts as supplied. Include an image path **only** when
   `image_verified is True`; never promote an unverified visual hit to a cited
   original. A verified image-only page may be used as evidence; a page with
   neither text nor verified image is omitted. Missing identity/page is omitted.
+- `doc_id` is preserved from each item. Items without a valid `doc_id`
+  convert to `None` and can never match a document selection (fails closed).
 - This adapter does **not** validate file ownership, manifest membership, or
   whether a generated answer is factually supported. PR #15 must fix its
   pending manifest/provenance findings and supply validated evidence before
   production use. Synthetic unit tests validate only the shape and gates.
-- `QuizRequest.materials` currently contains **document filenames**, matching
-  `EvidenceItem.filename`. If Issue #7 uses document IDs in its picker, its
-  server handler must resolve IDs to the approved filenames or the interface
-  must change explicitly. No implicit ID/name substitution.
+- `QuizRequest.materials` contains **unique document IDs** (`EvidenceRef.doc_id` /
+  `EvidenceItem.doc_id`), never filenames. The document store permits
+  different files with identical filenames (records are keyed by content
+  hash), so filename scoping would leak evidence across selections.
+  `EvidenceRef.document` keeps the filename only as display metadata for
+  student-facing feedback. Issue #7's picker must pass document IDs directly;
 - The current topic filter is a case-insensitive literal substring of the
   excerpt. This is not semantic retrieval. Image-only evidence is excluded
   when a topic is supplied, unless a future retriever supplies topic-matched
