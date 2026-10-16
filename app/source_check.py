@@ -12,9 +12,9 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
-from .qna_schema import QnaParseError, Source
+from .qna_schema import QnaParseError, Source, coerce_bool
 
 SUPPORTED_THRESHOLD = 0.25
 WEAK_THRESHOLD = 0.10
@@ -66,6 +66,49 @@ def check_sources(answer: str, sources: tuple[Source, ...]) -> tuple[SourceCheck
     return tuple(checks)
 
 
+@dataclass(frozen=True)
+class CitationCheck:
+    index: int
+    valid: bool
+    reason: str
+
+
+def _normalize(text: str) -> str:
+    """Case- and whitespace-collapsed text for excerpt authenticity checks."""
+    return " ".join(text.split()).lower()
+
+
+def verify_citations(
+    sources: tuple[Source, ...], evidence: Sequence[Source]
+) -> tuple[CitationCheck, ...]:
+    """Verify model citations against the evidence originally supplied.
+
+    A citation is valid only when its (document, page) exists in the
+    evidence AND its excerpt appears (verbatim, modulo case/whitespace)
+    inside that evidence entry's excerpt. Fabricated or mismatched
+    citations are flagged so the orchestrator can drop them — a model
+    must never be allowed to invent sources.
+    """
+    checks = []
+    for i, src in enumerate(sources):
+        matches = [e for e in evidence if e.document == src.document and e.page == src.page]
+        if not matches:
+            checks.append(
+                CitationCheck(i, False, f"no evidence for ({src.document}, page {src.page})")
+            )
+        elif any(_normalize(src.excerpt) in _normalize(e.excerpt) for e in matches):
+            checks.append(
+                CitationCheck(i, True, f"excerpt matches evidence ({src.document}, page {src.page})")
+            )
+        else:
+            checks.append(
+                CitationCheck(
+                    i, False, f"excerpt not found in evidence ({src.document}, page {src.page})"
+                )
+            )
+    return tuple(checks)
+
+
 # -- optional LLM judge (e2e tier) ------------------------------------------
 
 JUDGE_SYSTEM_PROMPT = (
@@ -93,7 +136,7 @@ def judge_sources(
                 ]
             )
             verdict_obj = json.loads(_first_json_object(raw))
-            supported = bool(verdict_obj.get("supported"))
+            supported = coerce_bool(verdict_obj.get("supported"))
         except (QnaParseError, json.JSONDecodeError, TypeError, ValueError):
             supported = None  # fall back to the heuristic below
         heuristic = overlap_fraction(answer, source.excerpt)
