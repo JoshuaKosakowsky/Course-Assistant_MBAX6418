@@ -1018,3 +1018,89 @@ def test_valid_zero_page_manifest_still_purges(tmp_path):
     assert not stats.visual_failed
     assert len(backend.vectors) == 0
     assert rec.doc_id not in indexer.visual.state.doc_ids()
+
+
+
+# --------------------------------------------------------------------------
+# ROUND 5 (review finding): malformed manifest STRUCTURES must never be
+# mistaken for 'intentionally empty' — only a valid pages: [] purges.
+# --------------------------------------------------------------------------
+
+def test_manifest_pages_dict_preserves_vectors(tmp_path):
+    """{\"pages\": {}} looks 'empty' to a naive reader — it must be
+    flagged malformed and PRESERVE vectors, not purge."""
+    store, rec, indexer, backend = build_env(tmp_path)
+    indexer.index_document(rec.doc_id)
+    ids1 = set(backend.vectors)
+    mp = _manifest_path(store, rec.doc_id)
+    raw = json.loads(mp.read_text(encoding="utf-8"))
+    raw["pages"] = {}
+    mp.write_text(json.dumps(raw), encoding="utf-8")
+
+    stats = indexer.visual.index_document(rec.doc_id)
+    assert any("not a list" in f for f in stats.visual_failed)
+    assert set(backend.vectors) == ids1
+    assert len(indexer.visual.state.get(rec.doc_id)) == 2
+
+    stats2 = indexer.visual.reconcile()
+    assert any("not a list" in f for f in stats2.visual_failed)
+    assert set(backend.vectors) == ids1                 # reconcile too
+
+
+def test_manifest_pages_null_preserves_vectors(tmp_path):
+    """{\"pages\": null} must be flagged malformed (and must not crash),
+    preserving vectors and state."""
+    store, rec, indexer, backend = build_env(tmp_path)
+    indexer.index_document(rec.doc_id)
+    ids1 = set(backend.vectors)
+    mp = _manifest_path(store, rec.doc_id)
+    raw = json.loads(mp.read_text(encoding="utf-8"))
+    raw["pages"] = None
+    mp.write_text(json.dumps(raw), encoding="utf-8")
+
+    stats = indexer.visual.reconcile()
+    assert any("not a list" in f for f in stats.visual_failed)
+    assert set(backend.vectors) == ids1
+    assert len(indexer.visual.state.get(rec.doc_id)) == 2
+
+
+def test_manifest_malformed_page_records_preserve_vectors(tmp_path):
+    """A record missing image_path or with an unparseable number makes
+    the WHOLE manifest malformed — never a silent 'looks empty' purge."""
+    store, rec, indexer, backend = build_env(tmp_path)
+    indexer.index_document(rec.doc_id)
+    ids1 = set(backend.vectors)
+    mp = _manifest_path(store, rec.doc_id)
+    original = mp.read_text(encoding="utf-8")
+
+    for broken in ({"number": 1},                       # no image_path
+                   {"number": "x", "image_path": "p.png"},  # bad number
+                   {"number": True, "image_path": "p.png"},  # bool number
+                   "not-a-record",                      # not even a dict
+                   [{"number": 1, "image_path": ""}]):  # empty path
+        raw = json.loads(mp.read_text(encoding="utf-8"))
+        raw["pages"] = [broken] if not isinstance(broken, (list,)) else broken
+        mp.write_text(json.dumps(raw), encoding="utf-8")
+        stats = indexer.visual.reconcile()
+        assert any("malformed page record" in f for f in stats.visual_failed), \
+            f"shape {broken!r} must be rejected as malformed"
+        assert set(backend.vectors) == ids1, f"shape {broken!r} purged!"
+        assert len(indexer.visual.state.get(rec.doc_id)) == 2
+
+    # recovery once the VALID manifest returns
+    mp.write_text(original, encoding="utf-8")
+    stats2 = indexer.visual.reconcile()
+    assert not stats2.visual_failed
+    assert set(backend.vectors) == ids1
+
+
+def test_manifest_valid_page_records_validate(tmp_path):
+    """The parser's real record shape validates cleanly (no failures,
+    no purge of tracked pages)."""
+    store, rec, indexer, backend = build_env(tmp_path)
+    indexer.index_document(rec.doc_id)
+    ids1 = set(backend.vectors)
+    stats = indexer.visual.reconcile()
+    assert not stats.visual_failed
+    assert set(backend.vectors) == ids1
+    assert len(indexer.visual.state.get(rec.doc_id)) == 2

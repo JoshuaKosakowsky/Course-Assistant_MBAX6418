@@ -879,6 +879,30 @@ class VisualIndexer:
 
     # -- helpers ----------------------------------------------------------
 
+    @staticmethod
+    def _valid_page_record(p) -> bool:
+        """True when one manifest record matches the parser's schema:
+        a dict with an integer-parseable ``number`` and a non-empty
+        string ``image_path`` (other keys — text, embedded_images — are
+        optional). Any malformed record makes the WHOLE manifest
+        unreadable for indexing purposes: silently skipping bad records
+        could make a nonempty malformed manifest look intentionally
+        empty and trigger a destructive purge."""
+        if not isinstance(p, dict) or "number" not in p \
+                or "image_path" not in p:
+            return False
+        if not isinstance(p["image_path"], str) \
+                or not p["image_path"].strip():
+            return False
+        num = p["number"]
+        if isinstance(num, bool):
+            return False
+        try:
+            int(num)
+        except (TypeError, ValueError):
+            return False
+        return True
+
     def _manifest_pages(self, doc) -> List[Tuple[int, str]]:
         manifest = self.store.artifacts_dir / doc.doc_id / "manifest.json"
         if not manifest.is_file():
@@ -887,21 +911,24 @@ class VisualIndexer:
             raw = json.loads(manifest.read_text(encoding="utf-8"))
         except Exception:
             return []
-        pages = raw.get("pages", []) if isinstance(raw, dict) else []
+        pages = raw.get("pages", []) if isinstance(raw, dict) else None
+        if not isinstance(pages, list):
+            return []  # malformed: callers gate on _manifest_problem first
         out: List[Tuple[int, str]] = []
         for p in pages:
-            try:
-                out.append((int(p["number"]), str(p["image_path"])))
-            except (KeyError, TypeError, ValueError):
-                continue
+            if not self._valid_page_record(p):
+                return []  # never silently drop invalid records
+            out.append((int(p["number"]), str(p["image_path"])))
         return out
 
     def _manifest_problem(self, doc) -> Optional[str]:
         """None when the manifest is valid (with any page count), else a
-        reason. A MISSING or UNREADABLE manifest is NOT proof that a
-        document intentionally has zero pages — callers must preserve
-        existing vectors and retryable state in that case and never purge
-        solely because metadata is temporarily unavailable."""
+        reason. A MISSING, UNREADABLE, or MALFORMED manifest is NOT proof
+        that a document intentionally has zero pages — callers must
+        preserve existing vectors and retryable state in that case and
+        never purge solely because metadata is temporarily unavailable.
+        An explicitly valid ``pages: []`` is the ONLY shape that means
+        'intentionally zero pages'."""
         manifest = self.store.artifacts_dir / doc.doc_id / "manifest.json"
         if not manifest.is_file():
             return (
@@ -920,6 +947,18 @@ class VisualIndexer:
                 f"{doc.doc_id}: manifest has no 'pages' record — existing "
                 f"visual vectors preserved (no purge)"
             )
+        pages = raw.get("pages")
+        if not isinstance(pages, list):
+            return (
+                f"{doc.doc_id}: manifest 'pages' is not a list — existing "
+                f"visual vectors preserved (no purge)"
+            )
+        for p in pages:
+            if not self._valid_page_record(p):
+                return (
+                    f"{doc.doc_id}: manifest contains a malformed page "
+                    f"record — existing visual vectors preserved (no purge)"
+                )
         return None
 
 
