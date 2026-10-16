@@ -7,11 +7,12 @@ course materials (slides, syllabus, and other files downloaded from Canvas).
 Built on hybrid RAG: keyword search + text embeddings + visual embeddings,
 with source-grounded evidence — including original page/slide images.
 
-**Status:** Phase 2 text chunking, BM25 keyword search, and ChromaDB
-semantic indexing are implemented on this branch (PR #13). The complete
-end-to-end Q&A/quiz pipeline has not yet been integrated. Work breakdown,
-ownership, and completion checks live in [PLAN.md](PLAN.md) and the GitHub
-issues.
+**Status:** Phase 1 ingestion (PDF/PPTX → text + page images, CLI +
+management UI) and Phase 2 text chunking, BM25 keyword search, and ChromaDB
+semantic indexing are implemented. PPTX conversion has been exercised and
+spot-checked on representative course decks. The complete end-to-end Q&A/quiz
+pipeline is not yet integrated. Work breakdown, ownership, and completion
+checks live in [PLAN.md](PLAN.md) and the GitHub issues.
 
 ---
 
@@ -50,8 +51,16 @@ python -m venv .venv
 pip install -r requirements.txt
 cp .env.example .env     # then fill in real values
 pytest                   # unit + smoke (offline)
+python -m app.ingest path/to/material.pdf  # add + parse a PDF
 python -m app.ui         # launch the Gradio management UI
 ```
+
+**Sample corpus:** A syllabus and five lecture slide PDFs plus the five
+source PPTX decks are kept locally under `data/incoming/` (gitignored). All
+six PDFs (152 pages) and all five decks (145 slides) have been parsed; every
+page yielded text and a rendered image. Fifteen converted slides (first,
+middle, last per deck) were visually spot-checked. Course materials are not
+committed to this public repository.
 
 ### Class services
 
@@ -83,9 +92,34 @@ Converted slides are rendered as page images, so verify after conversion
 that the slide layout still looks correct (any layout regression shows up
 as a garbled page image in the UI).
 
-> Status: PDF parsing is tested (unit + smoke). PPTX conversion is
-> implemented but **unverified locally until LibreOffice is installed** on a
-> dev machine (see PLAN.md).
+**Local verification:** LibreOffice 26.8.1 converted all five supplied lecture
+PPTX files successfully: 145/145 slides produced non-empty extracted text and
+rendered 150 dpi PNGs. Review output visually before relying on it; conversion
+fidelity beyond extraction/render completion is not guaranteed.
+
+> Status: PDF parsing is tested (unit + smoke). PPTX conversion is tested
+> locally against the five lecture decks above; see PLAN.md for the check.
+
+## Quiz engine (Issue #6, in progress)
+
+`app.quiz` and `app.quiz_generation` provide a standalone, offline quiz
+contract. `QuizRequest` selects materials, an optional topic, count, and seed;
+`generate_quiz(request, evidence, generator)` accepts supplied evidence and
+an injected question generator. The generator is currently a test double, **not**
+a class-endpoint client. `QuizSession.student_view()` exposes only prompts and
+choices until `submit()` or explicit `reveal()`; scoring and source-backed
+feedback follow. Answer placement is stable for the same seed and questions.
+
+Verify the offline core with:
+
+```bash
+pytest tests/unit/test_quiz.py tests/unit/test_quiz_generation.py tests/smoke/test_quiz_flow.py
+```
+
+Retrieval, real-model generation, the quiz UI (Issue #7), and live end-to-end
+validation remain pending; synthetic evidence in tests is not proof of live
+grounding. The provisional evidence and UI boundary is specified in
+[docs/QUIZ_INTEGRATION.md](docs/QUIZ_INTEGRATION.md).
 
 ## Security (class policy)
 
