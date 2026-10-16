@@ -22,7 +22,7 @@ from typing import Any, Sequence
 
 from .prompts import build_messages
 from .qna_schema import ParsedAnswer, QnaParseError, Source, parse_answer
-from .source_check import SourceCheck, check_sources
+from .source_check import CitationCheck, SourceCheck, check_sources, verify_citations
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +39,7 @@ class QnaResult:
     sources: tuple[Source, ...] = ()
     grounded: bool = False
     source_checks: tuple[SourceCheck, ...] = ()
+    citation_checks: tuple[CitationCheck, ...] = ()
     malformed: bool = False
 
 
@@ -85,14 +86,32 @@ class QnaOrchestrator:
         if parsed is None or malformed:
             return QnaResult(answer=MISSING_INFO_FALLBACK, grounded=False, malformed=True)
 
-        # A grounded answer must actually cite sources; anything else is
-        # normalized to the honest not-in-materials state.
-        grounded = parsed.grounded and bool(parsed.sources)
         answer = parsed.answer if parsed.answer.strip() else MISSING_INFO_FALLBACK
 
+        # A grounded answer must cite sources that (a) exist in the supplied
+        # evidence — fabricated document/page/excerpt citations are dropped —
+        # and (b) actually support the answer's claims. Anything else is
+        # normalized to the honest not-in-materials state.
+        grounded = parsed.grounded and bool(parsed.sources)
         if not grounded:
             return QnaResult(answer=answer, grounded=False)
 
         sources = tuple(parsed.sources)
-        checks = check_sources(answer, sources)
-        return QnaResult(answer=answer, sources=sources, grounded=True, source_checks=checks)
+        citation_checks = verify_citations(sources, tuple(evidence))
+        verified = tuple(s for s, ck in zip(sources, citation_checks) if ck.valid)
+        if not verified:
+            logger.warning("No citation verified against evidence; answer treated as ungrounded")
+            return QnaResult(answer=answer, grounded=False, citation_checks=citation_checks)
+
+        checks = check_sources(answer, verified)
+        if all(c.verdict == "unsupported" for c in checks):
+            logger.warning("No source supports the answer; answer treated as ungrounded")
+            return QnaResult(answer=answer, grounded=False, citation_checks=citation_checks)
+
+        return QnaResult(
+            answer=answer,
+            sources=verified,
+            grounded=True,
+            source_checks=checks,
+            citation_checks=citation_checks,
+        )
