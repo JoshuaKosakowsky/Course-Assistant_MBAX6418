@@ -17,9 +17,15 @@ Mutation semantics mirror ``app.keyword.KeywordIndex``:
 - ``remove_document`` matches the team's removal-hook contract
   (``Callable[[str], None]``) so ``store.register_removal_hook(index.
   remove_document)`` works once ingestion is wired.
-- ``reindex_document`` deletes the document's old vectors first, so a
-  re-ingest under different chunking settings cannot leave stale vectors.
-- ``clear`` drops the whole collection (persistent path kept).
+- ``reindex_document`` EMBEDS AND VALIDATES the replacement vectors
+  BEFORE deleting the document's old vectors: an embedding outage or a
+  dimension mismatch leaves the previously indexed document intact and
+  searchable (nothing is destroyed unless the replacement is ready).
+  Stale vectors cannot survive a successful replacement because the old
+  ids are deleted before the new upsert.
+- ``clear`` drops the whole collection (persistent path kept) and resets
+  the locked-dimension bookkeeping, so a later insert with a different
+  embedding dimension works (the ``--reindex`` model-switch workflow).
 """
 
 from __future__ import annotations
@@ -104,14 +110,25 @@ class TextVectorIndex:
 
     def add(self, chunks: Sequence[Chunk]) -> None:
         """Embed and upsert chunk records (idempotent per chunk_id)."""
+        chunks = list(chunks)
+        if not chunks:
+            return
+        vectors = self._embed_vectors(chunks)
+        self._upsert(chunks, vectors)
+
+    def _embed_vectors(self, chunks: Sequence[Chunk]) -> list:
+        """Embed ``chunks`` and validate count + locked dimension.
+
+        Raises before ANY index mutation, so callers can retry without
+        losing previously indexed data. Raises ``EmbeddingsError`` when
+        no embedder is configured or the incoming dimension does not
+        match the locked collection dimension.
+        """
         if self._embedder is None:
             raise EmbeddingsError(
                 "no embedder configured (keyword-only mode): semantic "
                 "indexing is unavailable"
             )
-        chunks = list(chunks)
-        if not chunks:
-            return
         vectors = self._embedder.embed([c.text for c in chunks])
         if len(vectors) != len(chunks):
             raise RuntimeError(
@@ -128,6 +145,10 @@ class TextVectorIndex:
                 f"{incoming_dim}D. Run `python -m app.indexing --reindex` "
                 f"(or clear the collection) before switching embedding models."
             )
+        return vectors
+
+    def _upsert(self, chunks: Sequence[Chunk], vectors: Sequence) -> None:
+        """Insert/replace the given chunk records with precomputed vectors."""
         self._collection.upsert(
             ids=[c.chunk_id for c in chunks],
             embeddings=vectors,
@@ -156,17 +177,40 @@ class TextVectorIndex:
         return {cid.split("::", 1)[0] for cid in ids}
 
     def reindex_document(self, doc_id: str, chunks: Sequence[Chunk]) -> None:
-        """Replace a document's vectors (old chunking settings dropped)."""
+        """Replace a document's vectors safely (old chunking dropped).
+
+        Order matters: the replacement embeddings are computed and
+        validated FIRST (including the locked-dimension check), and only
+        then are the document's old vectors deleted and the new ones
+        upserted. If embedding fails (service outage, dimension mismatch,
+        malformed response), the exception propagates BEFORE any deletion
+        and the previously indexed document remains intact and searchable.
+        After a successful replacement the old chunk ids are gone, so
+        stale vectors can never survive a reindex.
+        """
+        chunks = list(chunks)
+        if not chunks:
+            # nothing to replace with: purge the stale record entirely
+            self.remove_document(doc_id)
+            return
+        vectors = self._embed_vectors(chunks)  # raises before any mutation
         self.remove_document(doc_id)
-        self.add(chunks)
+        self._upsert(chunks, vectors)
 
     def clear(self) -> None:
-        """Drop all vectors; the collection is recreated in place."""
+        """Drop all vectors; the collection is recreated in place.
+
+        The locked-dimension bookkeeping is reset with it: ChromaDB locks
+        the HNSW dimension at first insert of the NEW empty collection,
+        so a different embedding model can be used afterwards (e.g. the
+        ``python -m app.indexing --reindex`` model-switch workflow).
+        """
         name = self._collection.name
         self._client.delete_collection(name)
         self._collection = self._client.get_or_create_collection(
             name=name, metadata={"hnsw:space": "cosine"}
         )
+        self.dimension = self._stored_dimension()  # None: empty collection
 
     # ---- search --------------------------------------------------------
 

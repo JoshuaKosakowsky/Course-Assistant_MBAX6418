@@ -8,6 +8,7 @@ NOT real semantic quality. See tests/e2e for the real-endpoint check.
 import pytest
 
 from app.chunking import PageText, Chunk, chunk_pages
+from app.embeddings import EmbeddingsError
 from app.keyword import Hit
 from app.vector import TEXT_COLLECTION, VISUAL_COLLECTION, TextVectorIndex
 from tests.fake_embeddings import FakeEmbedder
@@ -261,3 +262,94 @@ def test_invalid_top_k_rejected(index, bad):
 def test_hits_are_keyword_hit_objects(index):
     hit = index.search("cash flow")
     assert hit and isinstance(hit[0], Hit)
+
+
+# 15. SAFE REINDEX: embed + validate BEFORE delete; clear resets dimension --
+
+class FailingEmbedder:
+    """Embedder that simulates a class-endpoint outage (Issue #2 review #1)."""
+
+    def embed(self, texts):
+        raise EmbeddingsError("service unavailable (simulated)")
+
+    def embed_one(self, text):
+        raise EmbeddingsError("service unavailable (simulated)")
+
+
+def test_reindex_outage_preserves_old_vectors(index):
+    """REGRESSION (review finding 1): an embedding outage during reindex
+    must NOT destroy the previously indexed document."""
+    assert index.search("free cash flow valuation")[0].chunk.doc_id == DOC_FIN
+    count_before = index.count
+    index._embedder = FailingEmbedder()
+    with pytest.raises(EmbeddingsError):
+        index.reindex_document(DOC_FIN, doc_chunks(DOC_FIN, "finance.pdf", FIN_TEXT))
+    # nothing was deleted: same count, still indexed
+    assert index.count == count_before
+    assert DOC_FIN in index.stored_doc_ids()
+    # still searchable once the embedder recovers
+    index._embedder = FakeEmbedder()
+    hits = index.search("free cash flow valuation")
+    assert hits and hits[0].chunk.doc_id == DOC_FIN
+
+
+def test_reindex_dimension_mismatch_preserves_old_vectors(tmp_path):
+    """A dimension mismatch on reindex must also leave old vectors intact."""
+    path = str(tmp_path / "db")
+    idx = TextVectorIndex(FakeEmbedder(dim=64), persist_dir=path)
+    idx.add(doc_chunks(DOC_FIN, "finance.pdf", FIN_TEXT))
+    count_before = idx.count
+
+    class Dim7:
+        def embed(self, texts):
+            return [[0.0] * 7 for _ in texts]
+
+    idx._embedder = Dim7()
+    with pytest.raises(Exception, match="dimension mismatch"):
+        idx.reindex_document(DOC_FIN, doc_chunks(DOC_FIN, "finance.pdf", FIN_TEXT))
+    assert idx.count == count_before
+    # still searchable with a compatible embedder
+    idx._embedder = FakeEmbedder(dim=64)
+    assert idx.search("free cash flow")
+
+
+def test_reindex_success_leaves_no_stale_vectors(tmp_path):
+    """Changing chunk layout replaces the old id set exactly."""
+    path = str(tmp_path / "db")
+    idx = TextVectorIndex(FakeEmbedder(), persist_dir=path)
+    many = doc_chunks(DOC_FIN, "finance.pdf", FIN_TEXT, chunk_size=40)   # several chunks
+    idx.add(many)
+    old_ids = set(idx._collection.get(include=[])["ids"])
+    assert len(old_ids) >= 2
+
+    few = doc_chunks(DOC_FIN, "finance.pdf", FIN_TEXT, chunk_size=400)   # one chunk
+    idx.reindex_document(DOC_FIN, few)
+    # exactly the current chunk ids remain — nothing stale, nothing missing
+    stored = set(idx._collection.get(where={"doc_id": DOC_FIN}, include=[])["ids"])
+    assert stored == {c.chunk_id for c in few}
+    assert idx.search("free cash flow")
+
+
+def test_clear_swaps_embedding_dimension(tmp_path):
+    """REGRESSION (review finding 2): clear() must reset the locked
+    dimension so a different embedding model can index afterwards."""
+    path = str(tmp_path / "db")
+    a = TextVectorIndex(FakeEmbedder(dim=64), persist_dir=path)
+    a.add(doc_chunks(DOC_FIN, "finance.pdf", FIN_TEXT))
+    assert a.dimension == 64
+
+    a.clear()
+    assert a.count == 0
+    assert a.dimension is None                       # reset, not stale 64
+
+    class Dim8:
+        def embed(self, texts):
+            return [[0.0] * 8 for _ in texts]
+
+    a._embedder = Dim8()
+    a.add(doc_chunks(DOC_MKT, "marketing.pdf", MKT_TEXT))
+    assert a.dimension == 8 and a.count >= 1
+
+    # a NEW handle on the same persistent store agrees (no stale lock)
+    b = TextVectorIndex(Dim8(), persist_dir=path)
+    assert b.dimension == 8

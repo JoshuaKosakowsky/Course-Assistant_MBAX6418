@@ -224,4 +224,3 @@ def test_keyword_only_mode_without_credentials(tmp_path):
                        persist_dir=tmp_path / "data" / "indexes")
     ui.build_ui(store, i2)
     assert i2.keyword.search("free cash flow")  # still searchable after restart
-
