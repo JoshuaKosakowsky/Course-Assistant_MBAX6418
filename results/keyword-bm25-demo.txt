@@ -1,0 +1,43 @@
+BM25 keyword retrieval — synthetic corpus demo
+==========================================================================
+Index: 6 chunks across 3 documents
+  doc-finance::p0001::c000  [Week 3 - Valuation.pdf p1]  Free cash flow equals operating cash flow minus capital expe...
+  doc-finance::p0001::c001  [Week 3 - Valuation.pdf p1]  free cash flows. The discount rate reflects the weighted ave...
+  doc-marketing::p0001::c000  [Week 5 - Brand Strategy.pdf p1]  Brand positioning defines how customers perceive a product r...
+  doc-marketing::p0001::c001  [Week 5 - Brand Strategy.pdf p1]  needs. Positioning statements combine target segment, catego...
+  doc-ops::p0001::c000  [Week 7 - Supply Chain.pdf p1]  Inventory management balances holding costs against stockout...
+  doc-ops::p0001::c001  [Week 7 - Supply Chain.pdf p1]  Reorder points and safety stock buffer against demand variab...
+
+QUERY: 'free cash flow valuation'   (expected topic: doc-finance)
+  [1.823] doc-finance::p0001::c000  Week 3 - Valuation.pdf p1  | Free cash flow equals operating cash flow minus capital expenditures.  <== expected
+  [0.918] doc-finance::p0001::c001  Week 3 - Valuation.pdf p1  | free cash flows. The discount rate reflects the weighted average cost  <== expected
+  [0.382] doc-ops::p0001::c000  Week 7 - Supply Chain.pdf p1  | Inventory management balances holding costs against stockout risk. Sup
+
+QUERY: 'customer segmentation'   (expected topic: doc-marketing)
+  [1.209] doc-marketing::p0001::c000  Week 5 - Brand Strategy.pdf p1  | Brand positioning defines how customers perceive a product relative to <== expected
+
+QUERY: 'safety stock inventory'   (expected topic: doc-ops)
+  [1.570] doc-ops::p0001::c001  Week 7 - Supply Chain.pdf p1  | Reorder points and safety stock buffer against demand variability. <== expected
+  [0.571] doc-ops::p0001::c000  Week 7 - Supply Chain.pdf p1  | Inventory management balances holding costs against stockout risk. Sup <== expected
+
+QUERY: 'warehouse delivery routing'   (expected topic: doc-ops)
+  [1.714] doc-ops::p0001::c000  Week 7 - Supply Chain.pdf p1  | Inventory management balances holding costs against stockout risk. Sup <== expected
+
+QUERY: 'weighted average cost of capital'   (expected topic: doc-finance)
+  [2.041] doc-finance::p0001::c001  Week 3 - Valuation.pdf p1  | free cash flows. The discount rate reflects the weighted average cost  <== expected
+  [0.344] doc-finance::p0001::c000  Week 3 - Valuation.pdf p1  | Free cash flow equals operating cash flow minus capital expenditures.  <== expected
+
+LIMITATION DEMO — same concept, different wording:
+  Query 'what is a firm worth' (paraphrase of "enterprise value")
+  -> ['no matches']
+  The valuation material answers this question (enterprise value is estimated
+  from free cash flows), yet BM25 finds nothing: the words do not overlap.
+
+Note: a first attempt with 'how much is a company worth' unexpectedly matched
+the marketing doc — because 'how' is not in bm25s's default 'en' stopword
+list and both texts contain it. Stopword coverage is a lever worth tuning.
+
+Conclusion: BM25 is exact-term retrieval. Semantically related content
+expressed with different vocabulary (paraphrases, synonyms, abbreviations)
+is missed, which is why Phase 2 also builds a text-embedding index over
+the same chunks — embeddings retrieve by meaning, not by word overlap.
