@@ -246,8 +246,18 @@ class VisualIndexer:
     # -- per-document ----------------------------------------------------
 
     def index_document(self, doc_id: str) -> IndexStats:
-        """Index every manifest page image for one document (incremental:
-        pages already recorded for the same path are skipped)."""
+        """Index every manifest page image for one document.
+
+        - UNCHANGED page (state matches the file stat) -> skipped, zero calls.
+        - NEW page -> embedded and added (unique content-addressed id).
+        - CHANGED page (a tracked page whose image bytes changed) -> the
+          old content-addressed vector must NOT survive alongside the new
+          one. PR #11 exposes no per-page removal, so this becomes a
+          controlled DOCUMENT-LEVEL replacement (``replace_document``):
+          all replacement embeddings are preflighted first, and only then
+          is the document evicted and re-added. Any preflight failure
+          aborts with the old vectors and state untouched.
+        """
         stats = IndexStats(doc_ids=1)
         try:
             doc = self.store.get(doc_id)
@@ -258,8 +268,99 @@ class VisualIndexer:
         if not pages:
             stats.visual_skipped.append(f"{doc_id}: no page images in manifest")
             return stats
+        if self._has_changed_page(doc_id, pages):
+            return stats + self.replace_document(doc_id)
         for page_no, image_path in pages:
             stats += self._index_one_page(doc_id, page_no, image_path)
+        self.state.save()
+        return stats
+
+    def _has_changed_page(self, doc_id: str, pages) -> bool:
+        """True when any TRACKED page's image file changed or vanished."""
+        state = self.state.get(doc_id)
+        if not state:
+            return False
+        for page_no, image_path in pages:
+            entry = state.get(str(page_no))
+            if entry is None:
+                continue  # a NEW page is strictly additive
+            if not _stat_matches(entry, Path(image_path)):
+                return True
+        return False
+
+    def replace_document(self, doc_id: str) -> IndexStats:
+        """Controlled document-level visual replacement (review finding 4).
+
+        Used when a tracked page's image changed (and by the explicit
+        backfill / ``--doc --visual-backfill`` workflows). Order:
+
+        1. PREFLIGHT: embed every manifest page BEFORE any destructive
+           step. Any missing/corrupt/embedding failure aborts here: the
+           old vectors and the state file stay intact (retryable).
+        2. EVICT only this document's old vectors (never the library).
+        3. RE-ADD every page with the preflighted embeddings. On a
+           non-atomic tail failure, state is recorded ONLY for pages that
+           were actually added, so a later run completes the replacement
+           without ever pretending success.
+        """
+        stats = IndexStats(doc_ids=1)
+        try:
+            doc = self.store.get(doc_id)
+        except Exception as exc:
+            stats.errors.append(f"{doc_id}: {exc}")
+            return stats
+        pages = self._manifest_pages(doc)
+        if not pages:
+            stats.visual_skipped.append(f"{doc_id}: no page images in manifest")
+            self.state.drop_doc(doc_id)
+            self.state.save()
+            return stats
+
+        # 1. preflight all replacement embeddings (no mutation yet)
+        ready: Dict[int, tuple] = {}
+        for page_no, image_path in pages:
+            stat = _file_stat(Path(image_path))
+            if stat is None or not image_path:
+                stats.visual_failed.append(
+                    f"{doc_id} p{page_no}: image missing — replacement "
+                    f"aborted, old vectors kept"
+                )
+                self.state.save()
+                return stats
+            try:
+                with Image.open(image_path) as im:
+                    vec = self.image_embedder(resize_for_embedding(im))
+            except Exception as exc:
+                stats.visual_failed.append(
+                    f"{doc_id} p{page_no}: {exc} — replacement aborted, "
+                    f"old vectors kept"
+                )
+                self.state.save()
+                return stats
+            ready[page_no] = (image_path, stat, vec)
+
+        # 2. evict ONLY this document's old vectors
+        try:
+            self.backend.remove_doc(doc_id)
+        except Exception as exc:
+            stats.visual_failed.append(
+                f"{doc_id}: eviction failed ({exc}) — old vectors kept"
+            )
+            self.state.save()
+            return stats
+
+        # 3. re-add every page; state only for successes (retryable tail)
+        added = 0
+        for page_no, (image_path, stat, vec) in ready.items():
+            try:
+                self.backend.add_image(doc_id, page_no, image_path, embedding=vec)
+                self.state.set_page(doc_id, page_no, stat,
+                                    _file_digest(Path(image_path)))
+                added += 1
+            except Exception as exc:
+                stats.visual_failed.append(f"{doc_id} p{page_no}: {exc}")
+        stats.visual_pages = added
+        stats.visual_added = added
         self.state.save()
         return stats
 
@@ -288,7 +389,7 @@ class VisualIndexer:
 
     # -- library-wide reconcile (incremental; safe) ----------------------
 
-    def reconcile(self, force: bool = False) -> IndexStats:
+    def reconcile(self, force: bool = False, verify_ids: bool = False) -> IndexStats:
         """Bring the visual index in line with the library, page by page.
 
         Incremental rules (zero network for already-correct pages):
@@ -297,11 +398,20 @@ class VisualIndexer:
            was down stays queued until it succeeds, across restarts.
         1. Prune orphan state (deleted docs that predate the feature).
         2. INTEGRITY: a tracking entry is NOT proof the vector still
-           exists — if the backend's total count is below the state's
-           expected total (e.g. partial collection loss), the affected
-           pages are verified via their own embedding and only genuinely
-           missing ones are re-added (see repair_missing_vectors).
-        3. Per-doc incremental pass (unchanged pages -> zero calls).
+           exists. The backend's total count is compared with the state's
+           expected total; on ANY mismatch (smaller: lost vectors; larger:
+           foreign/unrelated entries) the affected pages are verified by
+           content-addressed IDENTITY and only genuinely missing ones are
+           re-added (repair_missing_vectors). LIMITATION (documented, not
+           hidden): when the counts happen to match, a missing tracked
+           page masked by an unrelated vector is NOT detectable without a
+           per-page embed; the fast path therefore trusts equal counts
+           (zero network on healthy startups) and an explicit identity
+           audit is available via ``verify_ids=True`` (or the backfill
+           command), which checks every tracked page by its expected id.
+        3. Per-doc incremental pass (unchanged pages -> zero calls);
+           changed pages and explicit forced backfill use the safe
+           document-level replacement (replace_document).
 
         ``force=True`` ignores state and re-embeds everything (the
         explicit backfill command).
@@ -347,7 +457,10 @@ class VisualIndexer:
                     actual = int(self.backend.count())
                 except Exception:
                     actual = -1
-                if 0 <= actual < expected:
+                if verify_ids:
+                    # explicit identity audit: check EVERY tracked page by
+                    # its expected content-addressed id (catches equal-count
+                    # masking) — one embed per page, so opt-in only
                     stats += self.repair_missing_vectors()
                 elif self.state.corrupted and actual > 0:
                     stats.visual_failed.append(
@@ -356,11 +469,14 @@ class VisualIndexer:
                         "--visual-backfill' to rebuild state safely "
                         "(content-addressed ids prevent duplicates)"
                     )
+                elif actual >= 0 and actual != expected:
+                    # either direction of mismatch may hide missing or
+                    # foreign/unrelated vectors — verify by identity
+                    stats += self.repair_missing_vectors()
 
         for doc in self.store.list():
             if force:
-                self._purge_doc(doc.doc_id, stats)
-                stats += self.index_document(doc.doc_id)
+                stats += self.replace_document(doc.doc_id)
                 continue
             pages = self._manifest_pages(doc)
             state = self.state.get(doc.doc_id)
@@ -380,8 +496,9 @@ class VisualIndexer:
                 for p, img in pages
             )
             if stale:
-                self._purge_doc(doc.doc_id, stats)
-                stats += self.index_document(doc.doc_id)
+                # changed/removed pages: safe doc-level replacement (old
+                # vectors stay until the replacement is fully preflighted)
+                stats += self.replace_document(doc.doc_id)
             else:
                 # additive change (new pages only): no purge — the new
                 # pages are embedded, already-indexed pages are skipped

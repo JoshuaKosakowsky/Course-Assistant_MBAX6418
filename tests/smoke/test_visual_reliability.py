@@ -429,3 +429,203 @@ def test_identical_pages_restored_by_identity_not_distance(tmp_path):
     assert vid1 in backend.vectors             # the EXACT record came back
     assert vid2 in backend.vectors             # survivor untouched
     assert backend.vectors[vid2]["image_path"] == str(img2)
+
+
+
+# --------------------------------------------------------------------------
+# F. review finding 4: a CHANGED page must REPLACE its stale content-
+#    addressed vector, never coexist with it — and failure must never
+#    corrupt the old state (preflight -> evict -> re-add, per document)
+# --------------------------------------------------------------------------
+
+def _page_images(store, doc_id):
+    m = json.loads((store.artifacts_dir / doc_id / "manifest.json")
+                   .read_text(encoding="utf-8"))
+    return {p["number"]: Path(p["image_path"]) for p in m["pages"]}
+
+
+def test_changed_page_replaces_stale_vector(tmp_path):
+    store, rec, indexer, backend = build_env(tmp_path)
+    indexer.index_document(rec.doc_id)
+    ids1 = {v: e["page"] for v, e in backend.vectors.items()}
+    assert len(ids1) == 2 and set(ids1.values()) == {1, 2}
+    page1_old = next(v for v, pg in ids1.items() if pg == 1)
+    page2 = next(v for v, pg in ids1.items() if pg == 2)
+
+    # mutate ONLY page 1's image bytes (new visual content, same path)
+    img1 = _page_images(store, rec.doc_id)[1]
+    d = pymupdf.open(); pg = d.new_page()
+    pg.draw_rect(pymupdf.Rect(20, 20, 200, 200), color=(1, 0, 0),
+                 fill=(1, 0, 0))
+    pg.get_pixmap(dpi=72).save(str(img1)); d.close()
+
+    stats = indexer.index_document(rec.doc_id)
+    assert stats.visual_pages == 2
+    ids2 = {v: e["page"] for v, e in backend.vectors.items()}
+    assert len(ids2) == 2, "old page-1 vector must NOT survive the change"
+    new_p1 = next(v for v, pg in ids2.items() if pg == 1)
+    assert new_p1 != page1_old                    # stale id replaced
+    assert page2 in ids2                          # unaffected page same id
+    assert len(indexer.visual.state.get(rec.doc_id)) == 2
+
+
+def test_changed_page_preflight_failure_keeps_old_vectors(tmp_path):
+    store, rec, indexer, backend = build_env(tmp_path)
+    indexer.index_document(rec.doc_id)
+    ids1 = set(backend.vectors)
+    img = _page_images(store, rec.doc_id)[1]
+    img.write_bytes(b"not-an-image")
+    stats = indexer.index_document(rec.doc_id)
+    assert stats.visual_failed
+    assert any("replacement aborted" in f for f in stats.visual_failed)
+    assert set(backend.vectors) == ids1           # NOTHING evicted
+    assert len(indexer.visual.state.get(rec.doc_id)) == 2  # state intact
+
+
+def test_changed_page_eviction_failure_keeps_state_and_retries(tmp_path):
+    store, rec, indexer, backend = build_env(tmp_path)
+    indexer.index_document(rec.doc_id)
+    ids1 = set(backend.vectors)
+    img = _page_images(store, rec.doc_id)[1]
+    d = pymupdf.open(); pg = d.new_page()
+    pg.draw_rect(pymupdf.Rect(20, 20, 200, 200), color=(1, 0, 0),
+                 fill=(1, 0, 0))
+    pg.get_pixmap(dpi=72).save(str(img)); d.close()
+
+    backend.fail_remove = True
+    stats = indexer.index_document(rec.doc_id)
+    assert any("eviction failed" in f for f in stats.visual_failed)
+    assert set(backend.vectors) == ids1           # eviction failed: intact
+    assert len(indexer.visual.state.get(rec.doc_id)) == 2
+
+    backend.fail_remove = False                   # service back: retry works
+    stats2 = indexer.index_document(rec.doc_id)
+    assert not stats2.visual_failed
+    assert len(backend.vectors) == 2
+    assert len(indexer.visual.state.get(rec.doc_id)) == 2
+
+
+# --------------------------------------------------------------------------
+# G. review finding 5: equal COUNTs must not prove integrity — a missing
+#    tracked page masked by an unrelated/foreign vector needs IDENTITY
+#    verification (explicit audit; honest zero-network fast path)
+# --------------------------------------------------------------------------
+
+def test_equal_count_masking_detected_only_by_identity_audit(tmp_path):
+    store, rec, indexer, backend = build_env(tmp_path)
+    indexer.index_document(rec.doc_id)            # pages 1 and 2
+    victim = backend.drop_vector(rec.doc_id, 1)   # tracked page LOST
+    img = _page_images(store, rec.doc_id)[2]
+    backend.add_image("unrelated-doc", 9, img,    # foreign vector fills gap
+                      embedding=[1.0] + [0.0] * 63)
+
+    # counts EQUAL (1 tracked + 1 foreign == state's expected 2) -> the
+    # zero-network fast path cannot see the loss (documented limitation)
+    stats = indexer.reconcile()
+    assert backend.vectors.get(victim) is None
+
+    # the explicit IDENTITY audit verifies every tracked page by its
+    # expected (doc, page, digest) id and repairs only the missing one
+    stats2 = indexer.reconcile(verify_ids=True)
+    assert stats2.visual_repaired == 1
+    assert backend.vectors.get(victim) is not None       # page 1 restored
+    assert any(v["doc_id"] == "unrelated-doc"            # unrelated kept
+               for v in backend.vectors.values())
+
+
+def test_count_above_expected_triggers_identity_repair_not_deletion(tmp_path):
+    store, rec, indexer, backend = build_env(tmp_path)
+    indexer.index_document(rec.doc_id)            # pages 1,2 (state: 2)
+    # reduce tracked state to page 1 only (as if page 2 were untracked)
+    p1 = _page_images(store, rec.doc_id)[1]
+    import app.visual as visual_mod
+    st = visual_mod._file_stat(p1)
+    digest = visual_mod._file_digest(p1)
+    indexer.visual.state.drop_doc(rec.doc_id)
+    indexer.visual.state.set_page(rec.doc_id, 1, st, digest)
+    indexer.visual.state.save()
+    img = _page_images(store, rec.doc_id)[2]
+    backend.add_image("unrelated-doc", 9, img,
+                      embedding=[1.0] + [0.0] * 63)
+    # expected=1 vs actual=3 -> identity repair runs, re-adds NOTHING
+    # missing (page 1 present), and never deletes unrelated entries
+    stats = indexer.reconcile()
+    assert stats.visual_repaired == 0
+    assert any(v["doc_id"] == "unrelated-doc"
+               for v in backend.vectors.values())
+    assert len(backend.vectors) == 3
+
+
+# --------------------------------------------------------------------------
+# H. review findings 7 + 8: CLI --keyword-only --visual-backfill must fail
+#    cleanly (no UnboundLocalError) and --doc --visual-backfill must be
+#    SCOPED to that document only
+# --------------------------------------------------------------------------
+
+def test_keyword_only_visual_backfill_fails_cleanly(tmp_path, monkeypatch,
+                                                    capsys):
+    import app.indexing as indexing_mod
+
+    class FakeDS(indexing_mod.DocumentStore):
+        def __init__(self, *a, **k):
+            super().__init__(root=tmp_path / "ds")
+
+    monkeypatch.setattr(indexing_mod, "DocumentStore", FakeDS)
+    rc = indexing_mod.main(["--keyword-only", "--visual-backfill"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "--visual-backfill" in err and "NOT performed" in err
+    assert "UnboundLocalError" not in err
+
+
+def test_scoped_doc_visual_backfill_touches_only_that_doc(tmp_path,
+                                                          monkeypatch):
+    store = DocumentStore(root=tmp_path / "ds")
+    rec1 = store.add(make_pdf(tmp_path / "one.pdf", 2))
+    from app.parse import parse_file
+    parse_file(store.corpus_path(rec1.doc_id), rec1.doc_id,
+               store.artifacts_dir / rec1.doc_id)
+    rec2 = store.add(make_pdf(tmp_path / "two.pdf", 2))
+    parse_file(store.corpus_path(rec2.doc_id), rec2.doc_id,
+               store.artifacts_dir / rec2.doc_id)
+
+    import app.visual as visual_mod
+    import app.indexing as indexing_mod
+
+    env = {}
+
+    def fake_production(store_in):
+        backend = ChromaLikeBackend()
+        visual = VisualIndexer(backend, backend.embed, store_in,
+                               state=VisualState(tmp_path / "vs.json"))
+        env["backend"] = backend
+        return visual, "ok"
+
+    monkeypatch.setattr(visual_mod, "production_visual_indexer",
+                        fake_production)
+
+    class FakeDS(indexing_mod.DocumentStore):
+        def __init__(self, *a, **k):
+            super().__init__(root=tmp_path / "ds")
+
+    monkeypatch.setattr(indexing_mod, "DocumentStore", FakeDS)
+
+    n1 = len(manifest_pages(store, rec1.doc_id))
+    n2 = len(manifest_pages(store, rec2.doc_id))
+
+    # ingest doc1 only (text + visual): embeds doc1's pages
+    rc = indexing_mod.main(["--doc", rec1.doc_id])
+    assert rc == 0
+    assert env["backend"].embed_calls == n1
+
+    # SCOPED backfill: re-embeds ONLY doc1 (a fresh run, but the state
+    # file from the ingest above matches, so the ingest itself re-embeds
+    # nothing; doc2 must stay completely untouched)
+    rc = indexing_mod.main(["--doc", rec1.doc_id, "--visual-backfill"])
+    assert rc == 0
+    assert env["backend"].embed_calls == n1
+
+    # a plain --visual-backfill still covers the whole library
+    rc2 = indexing_mod.main(["--visual-backfill"])
+    assert rc2 == 0
+    assert env["backend"].embed_calls == n1 + n2

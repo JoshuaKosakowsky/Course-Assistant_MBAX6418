@@ -79,6 +79,16 @@ class FakeVisualBackend:
     def count(self):
         return len(self.entries)
 
+    def query_embedding(self, embedding, k=5):  # PR #11 protocol has this
+        scored = sorted(
+            ((vid, e) for vid, e in self.entries.items()),
+            key=lambda t: 0.0,
+        )
+        return [type("VH", (), {"doc_id": e["doc_id"], "page": e["page"],
+                                "image_path": e["image_path"], "id": vid,
+                                "distance": 0.0})()
+                for vid, e in scored[:k]]
+
 
 def fake_image_embedder(backend: FakeVisualBackend):
     def embed(image: Image.Image) -> list[float]:
@@ -290,23 +300,36 @@ def test_reconcile_purges_orphan_state_and_changed_docs(tmp_path):
 
 
 def test_reconcile_counts_corrupt_image_as_failed(tmp_path):
+    """A changed page whose replacement cannot be embedded must NEVER
+    destroy the old vectors: the replacement is preflighted first and
+    aborts untouched (review finding 4)."""
     store, rec, indexer, backend = build_env(tmp_path)
     indexer.index_document(rec.doc_id)
+    n = count_pages(store, rec.doc_id)
     good_pages = indexer.visual.state.get(rec.doc_id)
-    assert len(good_pages) == count_pages(store, rec.doc_id)
-    # corrupt ONE page image file
+    assert len(good_pages) == n
+    # corrupt ONE page image file (keep the original bytes to restore)
     manifest = store.artifacts_dir / rec.doc_id / "manifest.json"
     raw = json.loads(manifest.read_text(encoding="utf-8"))
     img = Path(raw["pages"][0]["image_path"])
+    original = img.read_bytes()
     img.write_bytes(b"not-an-image")
-    # corrupting the image also changes the file -> doc is "changed",
-    # so reconcile purges and re-adds; the corrupt page must FAIL honestly
+
+    embeds_before = backend.embed_calls
     stats1 = indexer.reconcile()
+    # honest failure: reported, and the OLD vectors/state are preserved
     assert stats1.visual_failed, "corrupt page must be reported as failed"
-    assert stats1.visual_pages == count_pages(store, rec.doc_id) - 1
-    # the failed page is NOT recorded in state (retried next run)
-    state_after = indexer.visual.state.get(rec.doc_id)
-    assert len(state_after) == count_pages(store, rec.doc_id) - 1
+    assert any("replacement aborted" in f for f in stats1.visual_failed)
+    assert len(backend.entries) == n, "old vectors must survive the abort"
+    assert len(indexer.visual.state.get(rec.doc_id)) == n
+
+    # fixing the image lets the SAME reconcile pass replace the document
+    img.write_bytes(original)
+    stats2 = indexer.reconcile()
+    assert stats2.visual_pages == n
+    assert not stats2.visual_failed
+    assert len(backend.entries) == n
+    assert len(indexer.visual.state.get(rec.doc_id)) == n
 
 
 # --------------------------------------------------------------------------
