@@ -12,7 +12,6 @@ original page/slide image.
 
 from __future__ import annotations
 
-import hashlib
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -73,14 +72,21 @@ class VisualIndex:
         image_path: str | Path,
         embedding: list[float] | None = None,
     ) -> str:
-        """Index one page/slide image. Idempotent per (doc, page, content).
+        """Index one page/slide image — one current vector per (doc, page).
 
-        Returns the stable vector id (content-addressed).
+        The vector id is the stable ``(doc_id, page)`` slot (not a content
+        hash), so re-indexing a changed page *replaces* that page's previous
+        embedding and stale versions never remain searchable. Re-indexing
+        identical content is a no-op upsert bearing the same id. The
+        embedding is computed BEFORE any store write, so an embedding or
+        validation failure leaves previously valid vectors untouched.
+
+        Returns the slot id (``doc_id:page``).
         """
         image_path = Path(image_path)
         if embedding is None:
             embedding = self._get_embedder()(Image.open(image_path))
-        vid = _image_id(doc_id, page, image_path)
+        vid = _slot_id(doc_id, page)
         self._collection.upsert(
             ids=[vid],
             embeddings=[embedding],
@@ -175,13 +181,13 @@ class VisualIndex:
         return ClassEmbeddingClient().embed_image
 
 
-def _image_id(doc_id: str, page: int, image_path: Path) -> str:
-    """Content-addressed id: stable across re-indexes of the same bytes."""
-    digest = hashlib.sha256()
-    with image_path.open("rb") as fh:
-        for chunk in iter(lambda: fh.read(1 << 20), b""):
-            digest.update(chunk)
-    return f"{doc_id}:{page}:{digest.hexdigest()[:10]}"
+def _slot_id(doc_id: str, page: int) -> str:
+    """Stable per-(doc_id, page) slot id.
+
+    Re-indexing a page replaces its vector (same id) instead of stacking a
+    second version, so stale embeddings of changed pages are never returned.
+    """
+    return f"{doc_id}:{page}"
 
 
 def _page_from_filename(path: Path) -> int:

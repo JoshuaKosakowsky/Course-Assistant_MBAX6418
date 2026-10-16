@@ -63,8 +63,72 @@ def test_reindex_same_image_is_idempotent(index_factory, tmp_path):
     path = make_image(tmp_path / "p1.png", (10, 10, 10))
     first = idx.add_image("docA", 1, path)
     second = idx.add_image("docA", 1, path)
-    assert first == second
+    assert first == second == "docA:1"
     assert idx.count() == 1
+
+
+def test_reindex_changed_page_replaces_stale_vector(index_factory, tmp_path):
+    """Regression: a changed page image must REPLACE its previous vector,
+    so stale embeddings of the old content never remain searchable."""
+    idx = index_factory()
+    page1_v1 = make_image(tmp_path / "p1_v1.png", (200, 30, 30))
+    page2 = make_image(tmp_path / "p2.png", (30, 200, 30))
+    idx.add_image("docA", 1, page1_v1)
+    idx.add_image("docA", 2, page2)
+    assert idx.count() == 2
+
+    page1_v2 = make_image(tmp_path / "p1_v2.png", (10, 10, 10))  # same page, new content
+    assert idx.add_image("docA", 1, page1_v2) == "docA:1"  # same slot id
+    assert idx.count() == 2  # no stacking
+
+    hits_new = idx.query_image(page1_v2)
+    assert hits_new[0].page == 1
+    hits_old = idx.query_image(page1_v1)  # old content must be gone
+    assert all(h.page != 1 for h in hits_old)
+
+
+def test_directory_reindex_replaces_changed_pages(index_factory, tmp_path):
+    """The directory path (CLI rerun after editing source images) must also
+    replace stale vectors rather than accumulating them."""
+    img_dir = tmp_path / "slides"
+    img_dir.mkdir()
+    page1_v1 = make_image(img_dir / "slide_1.png", (200, 30, 30))
+    make_image(img_dir / "slide_2.png", (30, 200, 30))
+
+    idx = index_factory()
+    assert idx.index_images_in_directory(img_dir, doc_id="lec1") == 2
+    assert idx.count() == 2
+
+    # Overwrite slide_1.png with different content, re-run the same path.
+    page1_v2 = make_image(img_dir / "slide_1.png", (10, 10, 10))
+    assert idx.index_images_in_directory(img_dir, doc_id="lec1") == 2
+    assert idx.count() == 2  # stale slide_1 vector replaced, not added
+
+    hits = idx.query_image(page1_v2)
+    assert hits[0].page == 1
+    assert all(h.page != 1 for h in idx.query_image(page1_v1))  # old content gone
+
+
+def test_embedding_failure_preserves_existing_vectors(index_factory, tmp_path):
+    """Regression: an embedding/validation failure must never delete or
+    disturb previously valid vectors (write happens only after embedding)."""
+    class ExplodingEmbedder:
+        def __call__(self, image):
+            if image.size == (W, H) and image.getpixel((0, 0)) == (250, 0, 0):
+                raise RuntimeError("endpoint rejected image")
+            return [0.1, 0.2, 0.3, 0.4]
+
+    idx = VisualIndex(root=tmp_path / "idx", embedder=ExplodingEmbedder())
+    good = make_image(tmp_path / "good.png", (30, 30, 200))
+    idx.add_image("docA", 1, good, embedding=[0.1, 0.2, 0.3, 0.4])
+    assert idx.count() == 1
+
+    bad = make_image(tmp_path / "bad.png", (250, 0, 0))
+    with pytest.raises(RuntimeError, match="rejected"):
+        idx.add_image("docA", 2, bad)  # embedding raises -> nothing written
+
+    assert idx.count() == 1  # previous vector intact
+    assert idx.remove_doc("docA") == 1
 
 
 def test_collection_is_visual_separate_from_text(index_factory):
