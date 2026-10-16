@@ -134,6 +134,26 @@ Startup wires the indexer automatically: BM25 is rebuilt from the library and
 parsed artifacts, ChromaDB reuses existing vectors (no re-embedding), and
 deleting a document purges both indexes.
 
+### Lookup in the Library PDFs
+
+A **Lookup** section below the document-removal controls accepts a question. Select **Look up**
+or press Enter to retrieve up to five matching text passages using the existing
+BM25 keyword index. Each result includes the PDF filename, physical page number
+(starting at 1), and a verbatim excerpt. This is source lookup, not an LLM-generated
+answer; no embedding or LLM endpoint is called by Lookup.
+
+Only currently registered `.pdf` files are searched, not source PPTX decks or
+deleted documents. New uploads use the existing indexing flow. Scanned/image-only
+pages require searchable extracted text; Lookup does not add OCR. Use specific
+terms from the PDFs if a natural-language question finds no useful passages.
+Questions are limited to 2,000 characters; empty input, no matches, unavailable
+indexes, and retrieval failures receive explanatory messages. Excerpts and
+filenames are HTML-escaped. Lookup does not modify library files, and the existing
+add/remove handlers and event wiring are unchanged. Previously displayed results
+are a snapshot: submit a new lookup after changing the Library.
+
+Offline verification: `python -m pytest tests/smoke/test_lookup.py -q`.
+
 ### Index / reindex from the command line
 
 ```bash
