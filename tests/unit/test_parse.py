@@ -28,6 +28,28 @@ def test_unsupported_format_raises_helpful_error(tmp_path):
         parse.parse_file(f, doc_id="x", artifacts_dir=tmp_path / "art")
 
 
+def test_validate_format_rejects_unsupported_before_registration(tmp_path):
+    f = tmp_path / "notes.docx"
+    f.write_bytes(b"docx bytes")
+    with pytest.raises(parse.UnsupportedFormatError, match="Unsupported format"):
+        parse.validate_format(f)
+
+
+def test_pptx_conversion_timeout_becomes_clean_conversion_error(tmp_path, monkeypatch):
+    import subprocess
+
+    def hang(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=["soffice"], timeout=300)
+
+    monkeypatch.setattr(parse, "find_soffice", lambda: tmp_path / "soffice")
+    monkeypatch.setattr(parse.subprocess, "run", hang)
+    deck = tmp_path / "deck.pptx"
+    deck.write_bytes(b"pptx bytes")
+
+    with pytest.raises(parse.ConversionError, match="timed out after 300"):
+        parse.convert_pptx_to_pdf(deck, tmp_path / "out")
+
+
 def test_pptx_conversion_prefers_console_launcher_on_windows(tmp_path, monkeypatch):
     if parse.os.name != "nt":
         pytest.skip("Windows launcher selection")

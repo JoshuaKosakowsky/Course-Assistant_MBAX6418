@@ -25,7 +25,8 @@ from .config import APP_HOST, APP_PORT
 from .documents import DocumentNotFoundError, DocumentStore
 from .embeddings import EmbeddingsError, TextEmbeddingClient
 from .indexing import CorpusIndexer
-from .parse import ConversionError, parse_file
+from .ingest import add_and_parse
+from .parse import ConversionError, UnsupportedFormatError
 
 SUPPORTED_LABEL = (
     "**Supported formats:** PDF (direct) · PPTX (auto-converted — needs "
@@ -80,34 +81,28 @@ def add_file(
         return _library_df(store), _choices(store), "Choose a file to upload first."
     source = Path(path)
 
-    existing = store.find(source)
-    try:
-        doc = store.add(source)
-    except Exception as exc:  # pragma: no cover - upstream failure surface
-        return _library_df(store), _choices(store), f"Add failed: {exc}"
-
-    if existing is not None:
-        return (
-            _library_df(store),
-            _choices(store),
-            f"'{doc.filename}' is already in the library — no duplicate added.",
-        )
-
     parsed_ok = False
+    doc = None
     try:
-        result = parse_file(
-            store.corpus_path(doc.doc_id), doc.doc_id, store.artifacts_dir / doc.doc_id
-        )
-        parsed_ok = True
-        note = f"Added '{doc.filename}' · parsed {len(result.pages)} page(s)."
-        if result.converted_from:
-            note += " (converted from PPTX)"
+        doc, result, already_parsed = add_and_parse(store, source)
+    except UnsupportedFormatError as exc:
+        note = f"Could not add '{source.name}': {exc}"
     except ConversionError as exc:
-        note = f"Added '{doc.filename}', but parsing needs LibreOffice: {exc}"
-    except Exception as exc:  # pragma: no cover - upstream failure surface
-        note = f"Added '{doc.filename}', but parsing failed: {exc}"
+        note = f"Could not add '{source.name}': {exc}"
+    except Exception as exc:  # unknown parse failure — never crash the UI
+        note = f"Could not add '{source.name}', parsing failed: {exc}"
+    else:
+        if already_parsed:
+            note = f"'{doc.filename}' is already in the library — no duplicate added."
+        else:
+            parsed_ok = True
+            assert result is not None  # parse failure raises inside add_and_parse
+            note = f"Added '{doc.filename}' · parsed {len(result.pages)} page(s)."
+            if result.converted_from:
+                note += " (converted from PPTX)"
 
     if indexer is not None and parsed_ok:
+        assert doc is not None  # parsed_ok implies add_and_parse succeeded
         try:
             stats = indexer.index_document(doc.doc_id)
             note += f" · indexed {stats.chunks} chunk(s)"

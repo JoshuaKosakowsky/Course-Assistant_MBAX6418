@@ -57,6 +57,17 @@ class ParseResult:
     manifest_path: str
 
 
+def validate_format(source: Path) -> None:
+    """Raise UnsupportedFormatError when the file extension is not accepted.
+
+    Callers must run this BEFORE registering a document in the library so
+    unsupported files never leave a record behind.
+    """
+    ext = Path(source).suffix.lower()
+    if ext not in SUPPORTED_EXTENSIONS:
+        raise UnsupportedFormatError(_UNSUPPORTED_MESSAGE.format(ext=ext))
+
+
 def find_soffice() -> Path | None:
     """Locate LibreOffice's console launcher: env override, PATH, or
     standard Windows install paths. Prefer ``soffice.com`` on Windows so
@@ -110,7 +121,14 @@ def convert_pptx_to_pdf(source: Path, out_dir: Path) -> Path:
         str(out_dir),
         str(source),
     ]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    except subprocess.TimeoutExpired:
+        raise ConversionError(
+            "LibreOffice conversion timed out after 300 seconds. The deck "
+            "may be too large or corrupted; export it to PDF manually and "
+            "upload the PDF instead."
+        ) from None
     pdf_path = out_dir / (source.stem + ".pdf")
     if proc.returncode != 0 or not pdf_path.is_file():
         raise ConversionError(
@@ -144,9 +162,8 @@ def parse_file(source: Path, doc_id: str, artifacts_dir: Path) -> ParseResult:
     missing. Writes a manifest.json alongside the pages.
     """
     source = Path(source)
+    validate_format(source)
     ext = source.suffix.lower()
-    if ext not in SUPPORTED_EXTENSIONS:
-        raise UnsupportedFormatError(_UNSUPPORTED_MESSAGE.format(ext=ext))
     artifacts_dir.mkdir(parents=True, exist_ok=True)
 
     converted_from: str | None = None
