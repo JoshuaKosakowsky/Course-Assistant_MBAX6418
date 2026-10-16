@@ -109,6 +109,8 @@ def retrieve(
     """
     outcome = RetrievalOutcome(query=query)
     text = (query or "").strip()
+    if not isinstance(top_k, int) or isinstance(top_k, bool) or top_k < 1:
+        raise ValueError(f"top_k must be a positive integer, got {top_k!r}")
     if not text:
         outcome.stages = {s: "skipped" for s in
                           ("keyword", "semantic", "fusion", "rerank", "visual")}
@@ -138,12 +140,17 @@ def retrieve(
                                       candidate_k=candidate_k,
                                       doc_ids=doc_ids)
         degraded = [d for d in engine.degraded]
-        outcome.stages["keyword"] = (
-            "degraded" if any(d.startswith("keyword:") for d in degraded) else "ok"
-        )
-        outcome.stages["semantic"] = (
-            "degraded" if any(d.startswith("vector:") for d in degraded) else "ok"
-        )
+        # stage health reflects only the retrievers that were actually
+        # registered: with no vector source, 'semantic' must stay 'skipped'
+        # even though keyword retrieval ran (review finding 10)
+        if "keyword" in sources:
+            outcome.stages["keyword"] = (
+                "degraded" if any(d.startswith("keyword:") for d in degraded) else "ok"
+            )
+        if "vector" in sources:
+            outcome.stages["semantic"] = (
+                "degraded" if any(d.startswith("vector:") for d in degraded) else "ok"
+            )
         outcome.stages["fusion"] = "ok"
         for d in engine.degraded:
             outcome.warnings.append(f"retrieval degraded: {d}")
@@ -236,7 +243,7 @@ def retrieve(
                 items.append(item_from_page_candidate(
                     pc, rank, c.rerank_score, c.image_included, store))
         else:
-            for rank, pc in enumerate(pages, start=1):
+            for rank, pc in enumerate(pages[:top_k], start=1):
                 items.append(item_from_page_candidate(
                     pc, rank, None, False, store))
     elif outcome.rerank is not None and outcome.rerank.applied:
@@ -245,7 +252,7 @@ def retrieve(
                 c.original, final_rank=rank, rerank_score=c.rerank_score,
                 image_included=c.image_included, store=store))
     else:
-        for rank, h in enumerate(outcome.fused, start=1):
+        for rank, h in enumerate(outcome.fused[:top_k], start=1):
             items.append(item_from_fused(
                 h, final_rank=rank, rerank_score=None,
                 image_included=False, store=store))

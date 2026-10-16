@@ -324,7 +324,9 @@ def test_deleted_document_flagged(tmp_path):
     top = outcome.evidence.items[0]
     assert top.filename == "a.pdf"
     assert top.image_path is None  # never attach a deleted image
-    assert any("no longer exists" in w for w in top.warnings)
+    # rejected at validation (manifest gone with the artifacts, or the
+    # file itself gone) — every path ends in "no image" for this doc
+    assert any(("missing" in w or "no longer exists" in w) for w in top.warnings)
 
 
 # 16. consistent top-k --------------------------------------------------------------
@@ -477,3 +479,121 @@ def test_visual_retrieval_respects_doc_filters_without_text(tmp_path):
                        text_to_visual_embedder=lambda t: [0.1] * 8,
                        doc_ids=["some-other-doc"])
     assert outcome.visual_items == []  # filtered out client-side
+
+
+# 16b. fallback evidence bounded by top_k (review finding 6) -----------------
+
+def _seven_chunks():
+    """Seven DISTINCT chunks that ALL match the query 'common' (identical
+    text, unique ids), so fusion sees 7 candidates for the top_k bound."""
+    return [Chunk(chunk_id="c%02d" % i, doc_id="doc-a", filename="a.pdf",
+                  format=".pdf", page_no=1, index_in_page=0,
+                  text="common", image_path="") for i in range(7)]
+
+
+class BoomReranker:
+    """Transport failure: rerank_fused must fall back to fused order."""
+
+    def rank(self, query, documents, top_n=None):
+        raise RuntimeError("connection refused")
+
+
+def test_no_reranker_fallback_chunk_path_bounded_by_top_k(tmp_path):
+    store = DocumentStore(root=tmp_path / "data")
+    kw, vec = KeywordIndex(), TextVectorIndex(FakeEmbedder(),
+                                              persist_dir=tmp_path / "db")
+    chunks = _seven_chunks()
+    kw.add(chunks)
+    vec.add(chunks)
+    o = retrieve("common", keyword=kw, vector=vec, reranker=None,
+                 store=store, top_k=2)
+    assert len(o.evidence.items) == 2
+
+
+def test_failing_reranker_chunk_path_bounded_by_top_k(tmp_path):
+    store = DocumentStore(root=tmp_path / "data")
+    kw, vec = KeywordIndex(), TextVectorIndex(FakeEmbedder(),
+                                              persist_dir=tmp_path / "db")
+    chunks = _seven_chunks()
+    kw.add(chunks)
+    vec.add(chunks)
+    o = retrieve("common", keyword=kw, vector=vec, reranker=BoomReranker(),
+                 store=store, top_k=2)
+    assert o.evidence.items and len(o.evidence.items) == 2
+
+
+def test_no_reranker_visual_page_path_bounded_by_top_k(tmp_path):
+    store = DocumentStore(root=tmp_path / "data")
+    kw = KeywordIndex()
+    chunks = _seven_chunks()
+    kw.add(chunks)
+
+    class RankedSource:
+        def __init__(self, hits):
+            self._hits = hits
+
+        def count(self):
+            return len(self._hits)
+
+        def query_text(self, text, k=5):
+            return self._hits[:k]
+
+        def query_embedding(self, embedding, k=5):
+            return self._hits[:k]
+
+    n = 7
+    visual_hits = [type("VH", (), {"doc_id": "doc-a", "page": i + 1,
+                                   "image_path": "", "id": "v%d" % i,
+                                   "distance": 0.01 * (i + 1)})()
+                   for i in range(n)]
+    from app.visual_retrieval import VisualSourceAdapter
+    o = retrieve("common", keyword=kw, vector=None,
+                 visual_source=RankedSource(visual_hits), store=store,
+                 top_k=2, reranker=None)
+    assert len(o.evidence.items) == 2          # 7 page candidates -> top 2
+
+
+def test_invalid_top_k_rejected(tmp_path):
+    store, kw, vec = make_env(tmp_path)
+    for bad in (0, -1, True, "3"):
+        with pytest.raises(ValueError):
+            retrieve("free cash flow", keyword=kw, vector=vec,
+                     store=store, top_k=bad)
+
+
+# 16c. semantic stage health (review finding 10) ----------------------------
+
+def test_keyword_only_stage_reports_semantic_skipped(tmp_path):
+    store, kw, vec = make_env(tmp_path)
+    o = retrieve("free cash flow", keyword=kw, vector=None,
+                 store=store, top_k=3)
+    assert o.stages["keyword"] == "ok"
+    assert o.stages["semantic"] == "skipped"   # vector never ran, keyword ran
+
+
+def test_vector_ok_stage_reports_ok(tmp_path):
+    store, kw, vec = make_env(tmp_path)
+    o = retrieve("free cash flow", keyword=kw, vector=vec,
+                 store=store, top_k=3)
+    assert o.stages["keyword"] == "ok"
+    assert o.stages["semantic"] == "ok"
+
+
+def test_failing_vector_stage_reports_degraded(tmp_path):
+    class BoomVec:
+        def search(self, query, top_k=None):
+            raise RuntimeError("embedding service down")
+
+    store, kw, _ = make_env(tmp_path)
+    o = retrieve("free cash flow", keyword=kw, vector=BoomVec(),
+                 store=store, top_k=3)
+    assert o.stages["keyword"] == "ok"
+    assert o.stages["semantic"] == "degraded"
+
+
+def test_keyword_absent_stage_stays_skipped(tmp_path):
+    store, kw, vec = make_env(tmp_path)
+    o = retrieve("free cash flow", keyword=None, vector=vec,
+                 store=store, top_k=3)
+    assert o.stages["keyword"] == "skipped"
+    assert o.stages["semantic"] == "ok"
