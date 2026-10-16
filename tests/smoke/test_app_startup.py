@@ -11,10 +11,12 @@ builds the real class client or degrades to keyword-only mode.
 import pymupdf
 import pytest
 
+import app.ingest as ingest
 import app.ui as ui
 from app.documents import DocumentStore
 from app.embeddings import EmbeddingsError
 from app.indexing import CorpusIndexer
+from app.parse import ConversionError
 from tests.fake_embeddings import FakeEmbedder
 
 pytestmark = pytest.mark.smoke
@@ -104,22 +106,24 @@ def test_failed_parse_does_not_report_indexing(app_env):
 
 
 def test_libreoffice_missing_does_not_report_indexing(app_env):
-    """ConversionError path: message starts with 'Added' but must not
-    trigger indexing (regression for the old startswith('Added') check)."""
+    """ConversionError path: message warns about the missing converter but
+    must not trigger indexing (regression for the old startswith('Added')
+    check)."""
     store, indexer, tmp = app_env
-    # Monkey-patch ui.parse_file (the name ui imported at module load) to
-    # raise the conversion error a PPTX upload hits without LibreOffice.
-    real = ui.parse_file
+    # Monkey-patch the parse_file name app.ingest imported at module load
+    # (the seam add_and_parse() calls) to raise the conversion error a
+    # PPTX upload hits without LibreOffice.
+    real = ingest.parse_file
 
     def fake_convert(source, doc_id, out_dir):
-        raise ui.ConversionError("soffice not found")
+        raise ConversionError("soffice not found")
 
-    ui.parse_file = fake_convert
+    ingest.parse_file = fake_convert
     try:
         _df, _choices, note = ui.add_file(store, str(make_pdf(tmp, "b.pdf", FIN)), indexer)
     finally:
-        ui.parse_file = real
-    assert "parsing needs LibreOffice" in note
+        ingest.parse_file = real
+    assert "soffice not found" in note
     assert "indexed" not in note
     assert indexer.keyword.size == 0
 

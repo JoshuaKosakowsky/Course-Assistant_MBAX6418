@@ -6,6 +6,7 @@ temporary store. Offline — no class endpoints, no real course files.
 
 import pytest
 
+import app.parse as parse
 from app.documents import DocumentStore
 from app.ui import add_file, build_ui, remove_selected
 
@@ -51,9 +52,11 @@ def test_remove_without_selection_is_helpful(store):
     assert "Select a document" in status
 
 
-def test_pptx_without_libreoffice_adds_but_warns(store, tmp_path):
+def test_pptx_without_libreoffice_rolls_back_and_warns(store, tmp_path, monkeypatch):
+    monkeypatch.setattr(parse, "find_soffice", lambda: None)
     fake_pptx = tmp_path / "deck.pptx"
     fake_pptx.write_bytes(b"not a real pptx")
     df, _, status = add_file(store, str(fake_pptx))
-    assert len(df) == 1
+    assert len(df) == 0
+    assert store.list() == []  # rolled back so a retry works after installing LibreOffice
     assert "LibreOffice" in status
