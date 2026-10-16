@@ -83,8 +83,10 @@ def test_reindex_changed_page_replaces_stale_vector(index_factory, tmp_path):
 
     hits_new = idx.query_image(page1_v2)
     assert hits_new[0].page == 1
-    hits_old = idx.query_image(page1_v1)  # old content must be gone
-    assert all(h.page != 1 for h in hits_old)
+    assert hits_new[0].distance < 1e-6  # exact match for the CURRENT content
+    # The old content's exact vector must be gone (replaced, not stacked).
+    hits_old = idx.query_image(page1_v1)
+    assert all(h.distance > 1e-4 for h in hits_old)
 
 
 def test_directory_reindex_replaces_changed_pages(index_factory, tmp_path):
@@ -94,6 +96,9 @@ def test_directory_reindex_replaces_changed_pages(index_factory, tmp_path):
     img_dir.mkdir()
     page1_v1 = make_image(img_dir / "slide_1.png", (200, 30, 30))
     make_image(img_dir / "slide_2.png", (30, 200, 30))
+    # Preserve the original slide_1 bytes: the file gets overwritten below.
+    preserved_v1 = tmp_path / "slide_1_original.png"
+    preserved_v1.write_bytes((img_dir / "slide_1.png").read_bytes())
 
     idx = index_factory()
     assert idx.index_images_in_directory(img_dir, doc_id="lec1") == 2
@@ -106,7 +111,9 @@ def test_directory_reindex_replaces_changed_pages(index_factory, tmp_path):
 
     hits = idx.query_image(page1_v2)
     assert hits[0].page == 1
-    assert all(h.page != 1 for h in idx.query_image(page1_v1))  # old content gone
+    assert hits[0].distance < 1e-6  # current content matches exactly
+    # Old content's exact vector is gone after the directory re-run.
+    assert all(h.distance > 1e-4 for h in idx.query_image(preserved_v1))
 
 
 def test_embedding_failure_preserves_existing_vectors(index_factory, tmp_path):
@@ -216,13 +223,15 @@ def test_index_directory_logs_counts(caplog, index_factory, tmp_path):
 
 def test_cli_fails_cleanly_without_endpoint_config(monkeypatch, tmp_path, capsys):
     """Negative case: offline runs must fail loudly, not hang or crash."""
-    import app.env as env_mod
+    import app.visual_embeddings as vem
+    import app.visual_index as vi_mod
     import app.index_visual as cli
 
-    monkeypatch.setattr(env_mod, "VISUAL_EMBED_BASE_URL", "")
-    monkeypatch.setattr(env_mod, "VISUAL_EMBED_API_KEY", "")
-    monkeypatch.setattr(env_mod, "VISUAL_EMBED_MODEL", "")
-    monkeypatch.setattr(env_mod, "DATA_ROOT", tmp_path)
+    # Force the unconfigured state deterministically (a local .env with real
+    # keys must never let this test hit the network).
+    monkeypatch.setattr(vem, "VISUAL_EMBED_API_KEY", "")
+    monkeypatch.setattr(vem, "VISUAL_EMBED_MODEL", "")
+    monkeypatch.setattr(vi_mod, "DATA_ROOT", tmp_path)
 
     img_dir = tmp_path / "imgs"
     img_dir.mkdir()

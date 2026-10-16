@@ -3,7 +3,7 @@
 A chromadb-backed store, deliberately SEPARATE from the text index built in
 issue #2: this module owns its own persistent collection (``visual``) and
 namespace. Embedders are injected so offline tests use synthetic vectors
-while production uses the class endpoint client (app.embeddings).
+while production uses the class endpoint client (app.visual_embeddings).
 
 Metadata recorded per image: source document id, page number, and the
 image path, so Phase 3 can build evidence packs that point back at the

@@ -10,8 +10,8 @@ data-URI assumption, which is exactly the point of having them.
 import pytest
 from PIL import Image
 
-import app.env as env
-from app.embeddings import ClassEmbeddingClient
+import app.config as config
+from app.visual_embeddings import ClassEmbeddingClient
 from app.visual_index import VisualIndex
 
 pytestmark = pytest.mark.e2e
@@ -19,7 +19,9 @@ pytestmark = pytest.mark.e2e
 
 def _endpoint_configured() -> bool:
     return bool(
-        env.VISUAL_EMBED_BASE_URL and env.VISUAL_EMBED_API_KEY and env.VISUAL_EMBED_MODEL
+        config.VISUAL_EMBED_BASE_URL
+        and config.VISUAL_EMBED_API_KEY
+        and config.VISUAL_EMBED_MODEL
     )
 
 
