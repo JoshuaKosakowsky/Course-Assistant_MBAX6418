@@ -25,11 +25,14 @@ Status legend: `pending` (not started) · `in progress` · `done`.
 - [x] Document management (Task 1): add with content dedup (sha256), list,
       remove with cascade delete of corpus copy + artifacts + record;
       removal hooks for future indexes (app/documents.py)
-- [ ] PPTX conversion verified with LibreOffice installed (dev machines lack
-      it; manual-export workaround documented) — **unverified**
-- [ ] Sample corpus in `data/` (gitignored): syllabus + at least one slide
-      deck from Canvas
-- [ ] CLI/script: `python -m app.ingest <file>` -> verified text + images
+- [x] PPTX conversion verified with LibreOffice 26.8.1 on five
+      representative lecture decks: 145 slides converted; every slide yielded
+      non-empty text and a 150 dpi PNG; embedded-image counts recorded
+- [x] Sample corpus in `data/` (gitignored): syllabus + five course slide PDFs
+      from Canvas; parsed 152 pages, all with extracted text and 150 dpi PNGs;
+      first-page visual spot-check confirmed intact layouts
+- [x] CLI: `python -m app.ingest <file>` adds and parses one PDF/PPTX,
+      reports the manifest, and rejects unsupported formats helpfully
 - [x] Gradio material-management UI (add/remove/list via the app, `python -m
       app.ui`; dedup handled by the store) — Task 1 complete
 
@@ -64,6 +67,10 @@ Status legend: `pending` (not started) · `in progress` · `done`.
 - [ ] Scoring + per-question feedback linking to document/page/section/excerpt/image
 - [ ] Gradio tab 2: quiz flow (generate → answer → score → review)
 - **Definition of done:** full quiz flow works; answer key stable across runs of the same generation; solutions provably hidden pre-answer; feedback shows original evidence.
+- **In progress (Issue #6):** Offline evidence-scoped quiz contract, seeded
+  answer placement, concealment, scoring, and source feedback tested with
+  synthetic evidence. Retrieval/model integration, Issue #7 UI, and live
+  end-to-end verification are outstanding; do not close #6 yet.
 
 ## Phase 6 — Polish, testing, comparison
 - [ ] One design comparison (proposal: rerank vs. no-rerank on answer quality; alternatives: chunk size 250/500/1000, hybrid vs. keyword-only) — scripted, results saved in `results/`
