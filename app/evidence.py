@@ -230,6 +230,15 @@ def validate_artifact_image(
     if _mime_type(raw) is None:
         return None, "unreadable/corrupt image"
 
+    if store is None:
+        # No document store: ownership and manifest provenance CANNOT be
+        # verified, so this can never be a verified original citation —
+        # the path stays usable as an unverified candidate only.
+        return str(raw), (
+            "image ownership cannot be verified without the document "
+            "store (candidate only, never a verified original)"
+        )
+
     return str(raw), ""
 
 
@@ -245,6 +254,9 @@ def item_from_fused(
     warnings = [warn] if warn else []
     if not hit.chunk.text.strip():
         warnings.append("page has no extractable text (visual-only page)")
+    # only an affirmatively verified artifact is 'verified'; a path that
+    # merely exists (e.g. no store to prove ownership) stays unverified
+    verified = path is not None and warn == ""
     return EvidenceItem(
         doc_id=hit.chunk.doc_id,
         filename=hit.chunk.filename,
@@ -259,8 +271,9 @@ def item_from_fused(
         methods=hit.methods,
         evidence_ranks=hit.evidence,
         image_included=image_included,
-        image_source="artifact" if path else "none",
-        image_verified=path is not None,
+        image_source=("artifact" if verified
+                      else ("unverified" if path else "none")),
+        image_verified=verified,
         warnings=tuple(warnings),
     )
 

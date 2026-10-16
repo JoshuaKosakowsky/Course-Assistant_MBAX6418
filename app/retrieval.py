@@ -189,10 +189,29 @@ def retrieve(
                 item_from_visual(vc, i, store=store)
                 for i, vc in enumerate(visual_candidates, start=1)
             ]
+            if adapter.last_limitation:
+                # progressive-fetch cap: surfaced, never a silent complete
+                outcome.warnings.append(adapter.last_limitation)
             # page-level fusion only when visual candidates exist; with
             # none, the chunk-level text path is unchanged
             if visual_candidates:
                 pages = fuse_pages(outcome.fused, visual_candidates, store=store)
+                # Finding 3: a page with NEITHER usable text NOR a usable
+                # vetted image (image rejected at fusion) must not consume
+                # a ranked evidence slot; its rejection reason is
+                # preserved in the retrieval warnings instead.
+                usable_pages = []
+                for pc in pages:
+                    if pc.best_chunk is not None or pc.image_path:
+                        usable_pages.append(pc)
+                        continue
+                    reason = " | ".join(pc.warnings) if pc.warnings \
+                        else "no image path"
+                    outcome.warnings.append(
+                        f"dropped visual-only page {pc.doc_id} p{pc.page_no}: "
+                        f"no text and image rejected ({reason})"
+                    )
+                pages = usable_pages
         except Exception as exc:
             outcome.stages["visual"] = "degraded"
             outcome.warnings.append(f"visual retrieval failed: {exc}")

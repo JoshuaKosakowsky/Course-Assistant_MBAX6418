@@ -691,3 +691,212 @@ def test_overfetch_deleted_documents_excluded():
         "q", k=5, doc_ids={"doc-b"})          # vanished-doc NOT in the set
     assert all(c.doc_id != "vanished-doc" for c in out)
     assert {c.doc_id for c in out} == {"doc-b"}
+
+
+
+# ---------------------------------------------------------------------------
+# ROUND 4 (finding 2): progressive fetch — eligible results ranked beyond
+# the first window must still be found (both query routes)
+# ---------------------------------------------------------------------------
+
+class CountedSource(StubSource):
+    def __init__(self, hits, total=None):
+        super().__init__(hits=hits)
+        self._total = total if total is not None else len(hits)
+
+    def count(self):
+        return self._total
+
+
+def test_progressive_fetch_finds_eligible_beyond_first_window():
+    # doc-a appears ONLY at global rank 31; first window (k=5 -> 30) has
+    # zero eligible hits -> the window must GROW until it is found
+    hits = _ranked_hits(60, doc_at_rank=31)
+    src = CountedSource(hits)
+    adapter = VisualSourceAdapter(src)
+    out = adapter.query_text("q", k=5, doc_ids={"doc-a"})
+    assert len(out) == 1 and out[0].doc_id == "doc-a"
+    assert out[0].rank == 31                     # global rank preserved
+    assert len(src.calls) > 1                    # more than one fetch round
+    assert src.calls[-1][2] >= 31                # window grew past rank 31
+
+
+def test_progressive_fetch_embedding_route_beyond_first_window():
+    hits = _ranked_hits(60, doc_at_rank=31)
+    src = CountedSource(hits)
+    adapter = VisualSourceAdapter(src)
+    out = adapter.query_embedding([0.1, 0.2], k=5, doc_ids={"doc-a"})
+    assert len(out) == 1 and out[0].rank == 31
+    assert len(src.calls) > 1
+
+
+def test_progressive_fetch_many_excluded_and_duplicate_hits():
+    # 40 global hits; only doc-a qualifies, appearing as a DUPLICATE page
+    # at ranks 35 and 36 plus a second page at rank 38
+    hits = _ranked_hits(40)                      # all doc-b
+    hits[34] = type("VH", (), {"doc_id": "doc-a", "page": 1, "image_path": "",
+                               "id": "v34", "distance": 0.35})()
+    hits[35] = type("VH", (), {"doc_id": "doc-a", "page": 1, "image_path": "",
+                               "id": "v35", "distance": 0.36})()
+    hits[37] = type("VH", (), {"doc_id": "doc-a", "page": 2, "image_path": "",
+                               "id": "v37", "distance": 0.38})()
+    src = CountedSource(hits)
+    out = VisualSourceAdapter(src).query_text("q", k=2, doc_ids={"doc-a"})
+    pages = {(c.doc_id, c.page) for c in out}
+    assert pages == {("doc-a", 1), ("doc-a", 2)}           # deduped
+    ranks = {c.page: c.rank for c in out}
+    assert ranks == {1: 35, 2: 38}                         # best global ranks
+
+
+def test_progressive_fetch_cap_reports_limitation():
+    # 500 results, doc-a only at rank 400: the hard 100-hit cap cannot
+    # reach it — the limitation MUST be surfaced, never silent
+    hits = _ranked_hits(500, doc_at_rank=400)
+    src = CountedSource(hits)
+    adapter = VisualSourceAdapter(src)           # default max_overfetch=100
+    out = adapter.query_text("q", k=5, doc_ids={"doc-a"})
+    assert out == []
+    assert adapter.last_limitation is not None
+    assert "stopped at the 100-hit window" in adapter.last_limitation
+    # sanity: a larger cap finds it
+    adapter2 = VisualSourceAdapter(src, max_overfetch=500)
+    out2 = adapter2.query_text("q", k=5, doc_ids={"doc-a"})
+    assert len(out2) == 1 and out2[0].rank == 400
+    assert adapter2.last_limitation is None
+
+
+
+
+
+# ---------------------------------------------------------------------------
+# ROUND 4 (finding 3): a rejected visual-only page (no text, no usable
+# image) must NEVER consume a ranked evidence slot — valid candidates win
+# ---------------------------------------------------------------------------
+
+def _doc_store_with_artifacts(tmp_path, pages=(1, 2)):
+    """Registered store + artifact layout for a real doc record."""
+    from app.documents import DocumentStore
+
+    store = DocumentStore(root=tmp_path / "data")
+    d = pymupdf.open(); pg = d.new_page()
+    pg.insert_text((72, 72), "cash flow terms")
+    d.save(str(tmp_path / "src.pdf")); d.close()
+    rec = store.add(tmp_path / "src.pdf")
+    doc_id = rec.doc_id
+    adir = store.artifacts_dir / doc_id / "pages"
+    adir.mkdir(parents=True, exist_ok=True)
+    made = {}
+    for pno in pages:
+        img = adir / f"page-{pno:03d}.png"
+        make_png(img)
+        made[pno] = img
+    (store.artifacts_dir / doc_id / "manifest.json").write_text(
+        json.dumps({"pages": [{"number": p, "text": "",
+                               "image_path": str(made[p]),
+                               "embedded_images": 0} for p in pages]}),
+        encoding="utf-8")
+    bdir = store.artifacts_dir / "doc-b" / "pages"
+    bdir.mkdir(parents=True, exist_ok=True)
+    foreign = bdir / "page-001.png"
+    make_png(foreign)
+    (store.artifacts_dir / "doc-b" / "manifest.json").write_text(
+        json.dumps({"pages": [{"number": 1, "text": "",
+                               "image_path": str(foreign),
+                               "embedded_images": 0}]}), encoding="utf-8")
+    return store, rec, made, foreign
+
+
+def test_rejected_visual_only_page_never_consumes_slot(tmp_path):
+    from app.keyword import KeywordIndex
+    from app.retrieval import retrieve as _retrieve
+    from app.chunking import chunk_pages, PageText
+
+    store, rec, made, foreign = _doc_store_with_artifacts(tmp_path)
+    doc_id = rec.doc_id
+    kw = KeywordIndex()
+    kw.add(chunk_pages(doc_id, "a.pdf",
+                       [PageText(page_no=1, text="cash flow terms",
+                                 image_path="")],
+                       chunk_size=40, chunk_overlap=0, format=".pdf"))
+
+    class Src:
+        def __init__(self, hits):
+            self._hits = hits
+
+        def count(self):
+            return 2
+
+        def query_text(self, text, k=5):
+            return self._hits[:k]
+
+        def query_embedding(self, embedding, k=5):
+            return self._hits[:k]
+
+    # candidate 1: real doc page 1 -> image is doc-B's artifact (REJECTED)
+    # candidate 2: real doc page 2 -> valid manifest-verified artifact
+    src = Src([
+        type("VH", (), {"doc_id": doc_id, "page": 1,
+                        "image_path": str(foreign), "id": "v1",
+                        "distance": 0.1})(),
+        type("VH", (), {"doc_id": doc_id, "page": 2,
+                        "image_path": str(made[2]), "id": "v2",
+                        "distance": 0.2})(),
+    ])
+
+    class BoomReranker:
+        def rank(self, query, documents, top_n=None):
+            raise RuntimeError("connection refused")
+
+    for reranker in (None, BoomReranker()):      # disabled AND failing
+        outcome = _retrieve("zzz-no-text-match", keyword=kw, vector=None,
+                            visual_source=src, store=store, top_k=1,
+                            reranker=reranker)
+        # only the VALID candidate is ranked; the rejected visual-only
+        # page never fills the single evidence slot
+        assert len(outcome.evidence.items) == 1, outcome.evidence
+        item = outcome.evidence.items[0]
+        assert item.page_no == 2
+        assert item.image_path == str(made[2])
+        assert item.image_verified is True
+        assert any("dropped visual-only page" in w
+                   for w in outcome.warnings)     # rejection reason preserved
+
+
+def test_rejected_visual_only_slot_filter_with_successful_rerank(tmp_path):
+    from app.keyword import KeywordIndex
+    from app.retrieval import retrieve as _retrieve
+    from app.chunking import chunk_pages, PageText
+
+    store, rec, made, foreign = _doc_store_with_artifacts(tmp_path)
+    doc_id = rec.doc_id
+    kw = KeywordIndex()
+    kw.add(chunk_pages(doc_id, "a.pdf",
+                       [PageText(page_no=1, text="cash flow terms",
+                                 image_path="")],
+                       chunk_size=40, chunk_overlap=0, format=".pdf"))
+
+    class Src:
+        def count(self):
+            return 1
+
+        def query_text(self, text, k=5):
+            # image that FAILS all checks (missing file) -> page without
+            # text and without image -> must be dropped, not ranked
+            return [type("VH", (), {"doc_id": doc_id, "page": 1,
+                                    "image_path": str(tmp_path / "nope.png"),
+                                    "id": "v1", "distance": 0.1})()]
+
+        def query_embedding(self, embedding, k=5):
+            return self.query_text("", k)
+
+    class SuccessReranker:
+        """Reranker that accepts every input and ranks in order."""
+
+        def rank(self, query, documents, top_n=None):
+            return {i: (len(documents) - i) / len(documents)
+                    for i in range(len(documents))}
+
+    outcome = _retrieve("zzz", keyword=kw, vector=None, visual_source=Src(),
+                        store=store, top_k=3, reranker=SuccessReranker())
+    assert len(outcome.evidence.items) == 0       # nothing usable remained
+    assert any("dropped visual-only page" in w for w in outcome.warnings)

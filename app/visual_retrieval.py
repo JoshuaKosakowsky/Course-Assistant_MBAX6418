@@ -103,31 +103,56 @@ class VisualSourceAdapter:
         self.max_candidates = max_candidates
         self.overfetch_factor = overfetch_factor
         self.max_overfetch = max_overfetch
+        self.last_limitation: Optional[str] = None
 
-    def _bounded_fetch(self, fetcher, k: int) -> list:
-        """Ask the backend for MORE than ``k`` global hits when a document
-        filter is involved, so eligible results ranked below the global
-        top-k are not starved by the later client-side filter.
+    def _progressive_fetch(self, fetcher, k_eff: int,
+                           doc_ids: Optional[Sequence[str]]) -> list:
+        """Fetch visual hits with GROWING windows until enough ELIGIBLE,
+        deduplicated candidates are found or the backend is exhausted.
 
-        The backend (PR #11 protocol) accepts no ``doc_ids``, so this is a
-        bounded overfetch: fetch up to ``min(total, k*factor+k, cap)``
-        global hits, then filter/dedupe/limit. The cap is an explicit,
-        documented safeguard: on adversarially large corpora where every
-        eligible hit ranks beyond the cap, completeness cannot be
-        guaranteed (honest limitation).
+        The PR #11 backend accepts no ``doc_ids``, so filtering happens
+        client-side; a fixed-size overfetch can starve eligible results
+        ranked below the window (e.g. a qualifying image at global rank
+        31 with a 30-hit window). Instead:
+
+        - fetch``k*factor+k`` hits first (cheap common case),
+        - then DOUBLE the window until ``k_eff`` eligible candidates are
+          found, `total`` is reached, or the hard ``max_overfetch`` cap
+          is hit,
+        - if the cap stops the search while candidates are still
+          incomplete AND more results exist, ``last_limitation`` is set
+          so the caller surfaces the incompleteness explicitly.
+
+        Deterministic: candidates are re-adapted from the full window
+        each round (best rank per (doc, page) wins), so global rank
+        order is preserved throughout.
         """
-        k = max(1, min(int(k), self.max_candidates))
+        self.last_limitation = None
+        k_eff = max(1, min(int(k_eff), self.max_candidates))
         try:
             total = max(0, int(self.source.count()))
         except Exception:
-            total = k  # no count(): fetch the plain k (no starvation fix)
-        fetch_n = min(total, k * self.overfetch_factor + k, self.max_overfetch)
-        return list(fetcher(fetch_n))
+            total = k_eff  # no count(): single plain fetch (no starvation fix)
+        fetch_n = min(total, k_eff * self.overfetch_factor + k_eff)
+        while True:
+            candidates = self._adapt(list(fetcher(fetch_n)), k_eff, doc_ids)
+            chosen = candidates[:k_eff]
+            if len(chosen) >= k_eff or fetch_n >= total:
+                return chosen
+            if fetch_n >= self.max_overfetch:
+                # hard cap: honest incompleteness report, never silent
+                self.last_limitation = (
+                    f"visual retrieval stopped at the {self.max_overfetch}-hit "
+                    f"window while {total} results exist: document-filtered "
+                    f"candidates may be incomplete (progressive fetch cap)"
+                )
+                return chosen
+            fetch_n = min(total, max(fetch_n + 1, fetch_n * 2),
+                          self.max_overfetch)
 
     def _query(self, query: str, k: int, doc_ids: Optional[Sequence[str]]) -> list:
-        hits = self._bounded_fetch(
-            lambda n: self.source.query_text(query, k=n), k)
-        return self._adapt(hits, k, doc_ids)[:k]
+        return self._progressive_fetch(
+            lambda n: self.source.query_text(query, k=n), k, doc_ids)
 
     def query_text(self, query: str, k: int = 5,
                    doc_ids: Optional[Sequence[str]] = None) -> List[VisualCandidate]:
@@ -135,9 +160,8 @@ class VisualSourceAdapter:
 
     def query_embedding(self, embedding: List[float], k: int = 5,
                         doc_ids: Optional[Sequence[str]] = None) -> List[VisualCandidate]:
-        hits = self._bounded_fetch(
-            lambda n: self.source.query_embedding(embedding, k=n), k)
-        return self._adapt(hits, k, doc_ids)[:k]
+        return self._progressive_fetch(
+            lambda n: self.source.query_embedding(embedding, k=n), k, doc_ids)
 
     def _adapt(self, hits: list, k: int,
                doc_ids: Optional[Sequence[str]]) -> List[VisualCandidate]:

@@ -351,3 +351,59 @@ def test_valid_manifest_entry_verifies(tmp_path):
     chunk = mk_chunk(page_no=1, image_path=str(img))
     path, note = validate_artifact_image(chunk, store)
     assert path == str(img) and note == ""
+
+
+
+# --------------------------------------------------------------------------
+# ROUND 4 (finding 1): without a document store an image can never be a
+# verified original citation — text survives, the claim does not
+# --------------------------------------------------------------------------
+
+def test_no_store_image_never_verified(tmp_path):
+    from app.evidence import item_from_fused
+
+    img = tmp_path / "foreign.png"
+    make_png(img)
+    chunk = mk_chunk("c1", doc_id="doc-a", page_no=1, text="real text",
+                     image_path=str(img))
+    item = item_from_fused(mk_fused(chunk, fused_rank=1), final_rank=1,
+                           rerank_score=None, image_included=False,
+                           store=None)
+    assert item.excerpt == "real text"              # text evidence preserved
+    assert item.image_path == str(img)              # path usable as candidate
+    assert item.image_verified is False             # NEVER a verified original
+    assert item.image_source == "unverified"
+    assert any("cannot be verified" in w for w in item.warnings)
+    # to_sources must not attach it as a verified citation image
+    pack = EvidencePack("q", items=[item])
+    assert pack.to_sources()[0].image_path is None
+
+
+def test_retrieve_without_store_never_verifies_foreign_image(tmp_path):
+    """END-TO-END: retrieve(store=None) with an artifact-path image must
+    keep the text but must not claim the image is verified, and the Q&A
+    sources must carry no image for it."""
+    from app.chunking import PageText, chunk_pages
+    from app.keyword import KeywordIndex
+    from app.retrieval import retrieve
+    from app.vector import TextVectorIndex
+
+    FIN = "Free cash flow equals operating cash flow minus capital expenditures."
+    img = tmp_path / "elsewhere.png"
+    make_png(img)
+    store = DocumentStore(root=tmp_path / "data")
+    kw = KeywordIndex()
+    vec = TextVectorIndex(FakeEmbedder(), persist_dir=tmp_path / "db")
+    chunks = chunk_pages("doc-a", "a.pdf",
+                         [PageText(page_no=1, text=FIN, image_path=str(img))],
+                         chunk_size=80, chunk_overlap=10, format=".pdf")
+    kw.add(chunks)
+    vec.add(chunks)
+    outcome = retrieve("free cash flow", keyword=kw, vector=vec,
+                       store=None, reranker=None, top_k=3)
+    assert outcome.evidence.items
+    item = outcome.evidence.items[0]
+    assert item.excerpt and item.excerpt.strip()
+    assert item.image_verified is False
+    sources = outcome.evidence.to_sources()
+    assert sources and all(s.image_path is None for s in sources)
