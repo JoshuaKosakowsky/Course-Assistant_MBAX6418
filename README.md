@@ -85,6 +85,25 @@ as a garbled page image in the UI).
 > implemented but **unverified locally until LibreOffice is installed** on a
 > dev machine (see PLAN.md).
 
+## Quiz engine (Issue #6, in progress)
+
+`app.quiz` and `app.quiz_generation` provide a standalone, offline quiz
+contract. `QuizRequest` selects materials, an optional topic, count, and seed;
+`generate_quiz(request, evidence, generator)` accepts supplied evidence and
+an injected question generator. The generator is currently a test double, **not**
+a class-endpoint client. `QuizSession.student_view()` exposes only prompts and
+choices until `submit()` or explicit `reveal()`; scoring and source-backed
+feedback follow. Answer placement is stable for the same seed and questions.
+
+Verify the offline core with:
+
+```bash
+pytest tests/unit/test_quiz.py tests/unit/test_quiz_generation.py tests/smoke/test_quiz_flow.py
+```
+
+Retrieval, real-model generation, the quiz UI (Issue #7), and live end-to-end validation
+remain pending; synthetic evidence in tests is not proof of live grounding.
+
 ## Security (class policy)
 
 - Keys live **only** in server-side environment variables or the local
