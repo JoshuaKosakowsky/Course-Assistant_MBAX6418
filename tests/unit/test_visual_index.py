@@ -151,13 +151,20 @@ def test_index_directory_logs_counts(caplog, index_factory, tmp_path):
 
 
 def test_cli_fails_cleanly_without_endpoint_config(monkeypatch, tmp_path, capsys):
-    """Negative case: offline runs must fail loudly, not hang or crash."""
+    """Negative case: offline runs must fail loudly, not hang or crash.
+
+    Patches the module-level bindings ClassEmbeddingClient actually reads
+    (app.embeddings re-imports these from app.env at load time), so the
+    test is env-independent: it simulates missing configuration even when
+    a real .env exists on the dev machine.
+    """
     import app.env as env_mod
+    import app.embeddings as em
     import app.index_visual as cli
 
-    monkeypatch.setattr(env_mod, "VISUAL_EMBED_BASE_URL", "")
-    monkeypatch.setattr(env_mod, "VISUAL_EMBED_API_KEY", "")
-    monkeypatch.setattr(env_mod, "VISUAL_EMBED_MODEL", "")
+    monkeypatch.setattr(em, "VISUAL_EMBED_BASE_URL", "")
+    monkeypatch.setattr(em, "VISUAL_EMBED_API_KEY", "")
+    monkeypatch.setattr(em, "VISUAL_EMBED_MODEL", "")
     monkeypatch.setattr(env_mod, "DATA_ROOT", tmp_path)
 
     img_dir = tmp_path / "imgs"
