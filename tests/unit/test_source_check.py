@@ -14,6 +14,7 @@ from app.source_check import (
     overlap_fraction,
     check_sources,
     judge_sources,
+    verify_citations,
 )
 
 pytestmark = pytest.mark.unit
@@ -102,3 +103,48 @@ def test_judge_sources_documents_unsupported():
     judge = JudgeStub([False])
     checks = judge_sources("retrieval generation", (src,), judge)
     assert checks[0].verdict == "unsupported"
+
+
+def test_judge_string_false_is_treated_as_false():
+    src = Source(document="d", page=1, excerpt=EXCERPT)
+    judge = JudgeStub(["false"])  # stub serializes this into JSON: "supported": "false"
+    checks = judge_sources("retrieval generation", (src,), judge)
+    assert checks[0].verdict == "unsupported"  # overrides the supported heuristic
+
+
+def test_judge_invalid_string_falls_back_to_heuristic():
+    src = Source(document="d", page=1, excerpt=EXCERPT)
+    judge = JudgeStub(["notabool"])
+    checks = judge_sources("retrieval generation", (src,), judge)
+    assert checks[0].verdict == "supported"  # heuristic kept
+
+
+# -- citation verification vs the supplied evidence -----------------------
+
+def test_verify_citation_matches_evidence():
+    evidence = (Source(document="rag.pdf", page=3, excerpt="RAG combines retrieval with generation."),)
+    cited = (Source(document="rag.pdf", page=3, excerpt="combines retrieval with generation"),)
+    checks = verify_citations(cited, evidence)
+    assert checks[0].valid is True
+
+
+def test_verify_citation_is_case_and_whitespace_tolerant():
+    evidence = (Source(document="rag.pdf", page=3, excerpt="RAG  combines\nretrieval with generation."),)
+    cited = (Source(document="rag.pdf", page=3, excerpt="combines Retrieval with generation"),)
+    assert verify_citations(cited, evidence)[0].valid is True
+
+
+def test_verify_citation_unknown_document_page_is_invalid():
+    evidence = (Source(document="rag.pdf", page=3, excerpt="RAG combines retrieval."),)
+    cited = (Source(document="other.pdf", page=9, excerpt="RAG combines retrieval."),)
+    check = verify_citations(cited, evidence)[0]
+    assert check.valid is False
+    assert "no evidence" in check.reason
+
+
+def test_verify_citation_wrong_excerpt_is_invalid():
+    evidence = (Source(document="rag.pdf", page=3, excerpt="RAG combines retrieval."),)
+    cited = (Source(document="rag.pdf", page=3, excerpt="The exam is on Friday."),)
+    check = verify_citations(cited, evidence)[0]
+    assert check.valid is False
+    assert "excerpt not found" in check.reason

@@ -33,6 +33,25 @@ def test_grounded_false_with_empty_sources():
     assert parsed.sources == ()
 
 
+def test_grounded_string_false_is_parsed_as_false():
+    # bool("false") is True — must not happen for model output.
+    parsed = parse_answer('{"answer": "Not covered.", "grounded": "false", "sources": []}')
+    assert parsed.grounded is False
+
+
+def test_grounded_string_true_and_numeric_values():
+    assert parse_answer('{"answer": "x", "grounded": "true"}').grounded is True
+    assert parse_answer('{"answer": "x", "grounded": 1}').grounded is True
+    assert parse_answer('{"answer": "x", "grounded": 0}').grounded is False
+
+
+def test_grounded_invalid_value_raises():
+    with pytest.raises(QnaParseError):
+        parse_answer('{"answer": "x", "grounded": "maybe", "sources": []}')
+    with pytest.raises(QnaParseError):
+        parse_answer('{"answer": "x", "grounded": null, "sources": []}')
+
+
 def test_tolerates_code_fences_and_surrounding_prose():
     raw = 'Here you go:\n```json\n' + VALID + '\n```\nHope that helps.'
     parsed = parse_answer(raw)
