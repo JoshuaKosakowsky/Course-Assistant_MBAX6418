@@ -42,7 +42,7 @@ Status legend: `pending` (not started) · `in progress` · `done`.
 - [ ] Chunk text with `langchain-text-splitters`, carrying source metadata on every chunk
 - [ ] Keyword index (`bm25s`) over chunks
 - [ ] Text embedding index (`chromadb`) — separate from visual
-- [ ] Visual embedding index over page/slide images — separate from text
+- [x] Visual embedding index over page/slide images — separate from text
 - [ ] Ingest script indexes the sample corpus; record chunk/index counts
 - **Definition of done:** each of the three indexes is independently queryable; counts logged; one sample query returns plausible hits per index.
 
