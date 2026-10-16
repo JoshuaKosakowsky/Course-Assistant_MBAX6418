@@ -61,7 +61,11 @@ class FakeVisualBackend:
     def add_image(self, doc_id, page, image_path, embedding=None):
         if self.fail_add:
             raise RuntimeError("embedding service down")
-        vid = f"{doc_id}:{page}:{len(self.entries)}"
+        # content-addressed id, exactly like MSpanny's _image_id():
+        # {doc_id}:{page}:{sha256(full file bytes)[:10]}
+        import hashlib
+        digest = hashlib.sha256(Path(image_path).read_bytes()).hexdigest()
+        vid = f"{doc_id}:{page}:{digest[:10]}"
         self.entries[vid] = {
             "doc_id": doc_id, "page": int(page), "image_path": str(image_path),
         }
@@ -78,6 +82,10 @@ class FakeVisualBackend:
 
     def count(self):
         return len(self.entries)
+
+    def get_ids(self):
+        """Read-only local id enumeration (identity integrity check)."""
+        return set(self.entries)
 
     def query_embedding(self, embedding, k=5):  # PR #11 protocol has this
         scored = sorted(

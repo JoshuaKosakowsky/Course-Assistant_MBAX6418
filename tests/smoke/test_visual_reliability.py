@@ -81,6 +81,10 @@ class ChromaLikeBackend:
     def count(self):
         return len(self.vectors)
 
+    def get_ids(self):
+        """Read-only local id enumeration (identity integrity check)."""
+        return set(self.vectors)
+
     def query_embedding(self, embedding, k=5):
         scored = sorted(
             ((id_, _cosine_dist(e["vec"], embedding), e) for id_, e in self.vectors.items()),
@@ -187,9 +191,9 @@ def test_lost_vector_detected_and_repaired(tmp_path):
     stats = indexer.reconcile()           # normal restart flow
     assert stats.visual_repaired == 1     # exactly the lost page restored
     assert backend.count() == len(pages)
-    # one verification embed for the lost page (present ones verified too:
-    # page 2 embedded for verification + skipped, page 1 embedded + re-added)
-    assert backend.embed_calls == embeds_before + len(pages)
+    # identity membership check is LOCAL: only the missing page is
+    # (re)embedded — no per-page verification embeds on every startup
+    assert backend.embed_calls == embeds_before + 1
     # metadata preserved: same doc/page/path as the manifest
     repaired = [e for e in backend.vectors.values()
                 if e["doc_id"] == rec.doc_id and e["page"] == 1]
@@ -217,6 +221,7 @@ def test_repair_reports_backend_without_inspection_interface(tmp_path):
     class OpaqueBackend(ChromaLikeBackend):  # hide public inspection
         count = None
         query_embedding = None
+        get_ids = None
 
     indexer.visual.backend = OpaqueBackend()
     indexer.visual.backend.vectors = backend.vectors
@@ -511,26 +516,30 @@ def test_changed_page_eviction_failure_keeps_state_and_retries(tmp_path):
 #    verification (explicit audit; honest zero-network fast path)
 # --------------------------------------------------------------------------
 
-def test_equal_count_masking_detected_only_by_identity_audit(tmp_path):
+def test_equal_count_masking_repaired_by_ordinary_reconcile(tmp_path):
+    """REGRESSION (finding 5): ordinary reconcile() must NOT trust equal
+    counts. A missing tracked page masked by an unrelated/foreign vector
+    (counts happen to match) is detected via read-only local id
+    enumeration and repaired WITHOUT verify_ids=True."""
     store, rec, indexer, backend = build_env(tmp_path)
     indexer.index_document(rec.doc_id)            # pages 1 and 2
     victim = backend.drop_vector(rec.doc_id, 1)   # tracked page LOST
     img = _page_images(store, rec.doc_id)[2]
     backend.add_image("unrelated-doc", 9, img,    # foreign vector fills gap
                       embedding=[1.0] + [0.0] * 63)
+    assert backend.count() == len(indexer.visual.state.get(rec.doc_id))
+    embeds_before = backend.embed_calls
 
-    # counts EQUAL (1 tracked + 1 foreign == state's expected 2) -> the
-    # zero-network fast path cannot see the loss (documented limitation)
-    stats = indexer.reconcile()
-    assert backend.vectors.get(victim) is None
-
-    # the explicit IDENTITY audit verifies every tracked page by its
-    # expected (doc, page, digest) id and repairs only the missing one
-    stats2 = indexer.reconcile(verify_ids=True)
-    assert stats2.visual_repaired == 1
+    stats = indexer.reconcile()                   # ordinary, no opt-in
+    assert stats.visual_repaired == 1             # masked loss repaired
     assert backend.vectors.get(victim) is not None       # page 1 restored
     assert any(v["doc_id"] == "unrelated-doc"            # unrelated kept
                for v in backend.vectors.values())
+    # detection was local: only the missing page was embedded once
+    assert backend.embed_calls - embeds_before <= 1
+    # a FOLLOW-UP audit now finds nothing to repair (idempotent)
+    stats2 = indexer.reconcile(verify_ids=True)
+    assert stats2.visual_repaired == 0
 
 
 def test_count_above_expected_triggers_identity_repair_not_deletion(tmp_path):
@@ -629,3 +638,149 @@ def test_scoped_doc_visual_backfill_touches_only_that_doc(tmp_path,
     rc2 = indexing_mod.main(["--visual-backfill"])
     assert rc2 == 0
     assert env["backend"].embed_calls == n1 + n2
+
+
+
+# --------------------------------------------------------------------------
+# I. REVIEW ROUND 2 (finding 5 completion): default identity verification
+# --------------------------------------------------------------------------
+
+def test_no_enumeration_backend_reports_limitation_not_silence(tmp_path):
+    """A backend with count/query but NO id enumeration gets an EXPLICIT
+    limitation report (equal-count masking undetectable by default) —
+    never a silent claim that integrity is assured."""
+    store, rec, indexer, backend = build_env(tmp_path)
+    indexer.index_document(rec.doc_id)
+    backend.get_ids = None                # shadow the enumeration probe
+    stats = indexer.reconcile()
+    assert any("enumeration" in f and "limitation" in f
+               for f in stats.visual_failed)
+    # the explicit deep audit still works and finds nothing wrong
+    stats2 = indexer.reconcile(verify_ids=True)
+    assert stats2.visual_repaired == 0
+
+
+# --------------------------------------------------------------------------
+# J. REVIEW ROUND 2: post-eviction partial re-add failure then recovery
+# --------------------------------------------------------------------------
+
+class FailFirstReadd(ChromaLikeBackend):
+    def __init__(self):
+        super().__init__()
+        self.fail_next_add = False
+
+    def add_image(self, doc_id, page, image_path, embedding=None):
+        if self.fail_next_add:
+            self.fail_next_add = False
+            raise RuntimeError("simulated one-off add failure")
+        return super().add_image(doc_id, page, image_path,
+                                 embedding=embedding)
+
+
+def _build_custom_env(tmp_path, backend_cls):
+    store = DocumentStore(root=tmp_path / "data")
+    rec = store.add(make_pdf(tmp_path / "deck.pdf", 2))
+    from app.parse import parse_file
+    parse_file(store.corpus_path(rec.doc_id), rec.doc_id,
+               store.artifacts_dir / rec.doc_id)
+    backend = backend_cls()
+    visual = VisualIndexer(backend, backend.embed, store,
+                           state=VisualState(tmp_path / "vs.json"))
+    indexer = CorpusIndexer(store, embedder=FakeEmbedder(),
+                            persist_dir=tmp_path / "db", visual=visual)
+    return store, rec, indexer, backend
+
+
+def test_partial_readd_failure_drops_entry_then_retry_recovers(tmp_path):
+    """REGRESSION (round-2 finding): after a successful eviction, a page
+    whose re-add fails must NOT keep its old tracking entry — otherwise
+    the next run would skip it (its image stat is unchanged) and the page
+    would be lost forever. The entry is dropped, and a plain retry
+    re-adds the page additively."""
+    store, rec, indexer, backend = _build_custom_env(tmp_path, FailFirstReadd)
+    indexer.index_document(rec.doc_id)
+    ids1 = {v: e["page"] for v, e in backend.vectors.items()}
+    assert len(ids1) == 2
+    page1_old = next(v for v, pg in ids1.items() if pg == 1)
+
+    # mutate ONLY page 1 -> doc-level replacement; page 1's re-add fails
+    img1 = _page_images(store, rec.doc_id)[1]
+    d = pymupdf.open(); pg = d.new_page()
+    pg.draw_rect(pymupdf.Rect(20, 20, 200, 200), color=(1, 0, 0),
+                 fill=(1, 0, 0))
+    pg.get_pixmap(dpi=72).save(str(img1)); d.close()
+    backend.fail_next_add = True
+
+    stats = indexer.index_document(rec.doc_id)
+    assert any("p1" in f for f in stats.visual_failed)
+    # eviction happened; page 2 re-added; page 1's OLD entry is gone
+    state = indexer.visual.state.get(rec.doc_id)
+    assert "1" not in state and len(state) == 1
+    pages_now = {v: e["page"] for v, e in backend.vectors.items()}
+    assert len(pages_now) == 1 and page1_old not in pages_now
+
+    # RETRY: page 1's image stat has NOT changed; the dropped entry must
+    # make this an additive re-index, not a silent skip
+    stats2 = indexer.index_document(rec.doc_id)
+    assert not stats2.visual_failed
+    pages_final = {v: e["page"] for v, e in backend.vectors.items()}
+    assert len(pages_final) == 2
+    assert page1_old not in pages_final          # stale id never returns
+    assert len(indexer.visual.state.get(rec.doc_id)) == 2
+
+
+# --------------------------------------------------------------------------
+# K. REVIEW ROUND 2: removing ALL pages from an indexed document
+# --------------------------------------------------------------------------
+
+def _empty_manifest(store, doc_id):
+    manifest = store.artifacts_dir / doc_id / "manifest.json"
+    raw = json.loads(manifest.read_text(encoding="utf-8"))
+    raw["pages"] = []
+    manifest.write_text(json.dumps(raw), encoding="utf-8")
+
+
+def test_removal_of_all_pages_purges_vectors_and_state(tmp_path):
+    """REGRESSION (round-2 finding): when the manifest loses every page
+    image, stale visual vectors must be purged — the tracking state must
+    never be dropped while searchable old vectors remain."""
+    store, rec, indexer, backend = build_env(tmp_path)
+    indexer.index_document(rec.doc_id)
+    assert len(backend.vectors) == 2
+
+    _empty_manifest(store, rec.doc_id)
+    stats = indexer.reconcile()
+    assert not stats.visual_failed
+    assert len(backend.vectors) == 0                      # purged
+    assert rec.doc_id not in indexer.visual.state.doc_ids()  # tracking gone
+
+
+def test_removal_of_all_pages_via_direct_index_document(tmp_path):
+    store, rec, indexer, backend = build_env(tmp_path)
+    indexer.index_document(rec.doc_id)
+    _empty_manifest(store, rec.doc_id)
+    stats = indexer.index_document(rec.doc_id)            # direct/upload path
+    assert not stats.visual_failed
+    assert len(backend.vectors) == 0
+    assert rec.doc_id not in indexer.visual.state.doc_ids()
+
+
+def test_empty_manifest_purge_failure_keeps_state_and_retries(tmp_path):
+    """If the purge itself fails (backend down), the tracking entry must
+    survive (durable pending queue) and a later run completes the purge —
+    stale vectors are never abandoned silently."""
+    store, rec, indexer, backend = build_env(tmp_path)
+    indexer.index_document(rec.doc_id)
+    _empty_manifest(store, rec.doc_id)
+
+    backend.fail_remove = True
+    stats = indexer.reconcile()
+    assert any("purge failed" in f for f in stats.visual_failed)
+    assert rec.doc_id in indexer.visual.state.doc_ids()   # still tracked
+    assert len(backend.vectors) == 2                      # nothing deleted
+
+    backend.fail_remove = False
+    stats2 = indexer.reconcile()
+    assert not stats2.visual_failed
+    assert len(backend.vectors) == 0
+    assert rec.doc_id not in indexer.visual.state.doc_ids()

@@ -168,6 +168,18 @@ class VisualState:
         with self._lock:
             self._data.pop(doc_id, None)
 
+    def drop_page(self, doc_id: str, page: int) -> None:
+        """Remove ONE page's tracking entry (used after a post-eviction
+        re-add failure: the old entry is no longer authoritative because
+        the vector is gone, and a later run must re-add the page even
+        though the image file's stat has not changed)."""
+        with self._lock:
+            data = self._data.get(doc_id)
+            if data is not None:
+                data.pop(str(page), None)
+                if not data:
+                    self._data.pop(doc_id, None)
+
     # -- durable pending removals (failed visual purges) -----------------
 
     def add_pending(self, doc_id: str) -> None:
@@ -267,6 +279,10 @@ class VisualIndexer:
         pages = self._manifest_pages(doc)
         if not pages:
             stats.visual_skipped.append(f"{doc_id}: no page images in manifest")
+            # never abandon searchable old vectors: purge them (durably
+            # queued for retry if the backend is down) before dropping
+            # the tracking state
+            self._purge_doc(doc_id, stats)
             return stats
         if self._has_changed_page(doc_id, pages):
             return stats + self.replace_document(doc_id)
@@ -312,8 +328,10 @@ class VisualIndexer:
         pages = self._manifest_pages(doc)
         if not pages:
             stats.visual_skipped.append(f"{doc_id}: no page images in manifest")
-            self.state.drop_doc(doc_id)
-            self.state.save()
+            # purge stale vectors; on backend failure the tracking entry
+            # stays (durable pending queue) instead of silently leaving
+            # searchable vectors behind
+            self._purge_doc(doc_id, stats)
             return stats
 
         # 1. preflight all replacement embeddings (no mutation yet)
@@ -349,7 +367,10 @@ class VisualIndexer:
             self.state.save()
             return stats
 
-        # 3. re-add every page; state only for successes (retryable tail)
+        # 3. re-add every page; state ONLY for successes; a failed page's
+        #    OLD entry is dropped (post-eviction it is no longer backed by
+        #    a vector) so the next run re-adds it even though its image
+        #    file's stat has not changed — retryable, never a silent skip
         added = 0
         for page_no, (image_path, stat, vec) in ready.items():
             try:
@@ -359,6 +380,7 @@ class VisualIndexer:
                 added += 1
             except Exception as exc:
                 stats.visual_failed.append(f"{doc_id} p{page_no}: {exc}")
+                self.state.drop_page(doc_id, page_no)
         stats.visual_pages = added
         stats.visual_added = added
         self.state.save()
@@ -398,17 +420,17 @@ class VisualIndexer:
            was down stays queued until it succeeds, across restarts.
         1. Prune orphan state (deleted docs that predate the feature).
         2. INTEGRITY: a tracking entry is NOT proof the vector still
-           exists. The backend's total count is compared with the state's
-           expected total; on ANY mismatch (smaller: lost vectors; larger:
-           foreign/unrelated entries) the affected pages are verified by
-           content-addressed IDENTITY and only genuinely missing ones are
-           re-added (repair_missing_vectors). LIMITATION (documented, not
-           hidden): when the counts happen to match, a missing tracked
-           page masked by an unrelated vector is NOT detectable without a
-           per-page embed; the fast path therefore trusts equal counts
-           (zero network on healthy startups) and an explicit identity
-           audit is available via ``verify_ids=True`` (or the backfill
-           command), which checks every tracked page by its expected id.
+           exists. Every reconcile verifies membership by expected IDENTITY:
+           the expected content-addressed ids are recomputed from state
+           ({doc}:{page}:{digest[:10]}) and compared against a read-only,
+           LOCAL enumeration of the backend's current ids — no embedding
+           calls are needed for detection, and an unrelated/foreign vector
+           can NEVER mask a missing tracked page (equal counts are never
+           trusted). Missing pages are re-added by the same identity.
+           Backends without any enumeration capability get an explicit
+           limitation report instead of a pretended guarantee; for those,
+           a count mismatch (either direction) still triggers the
+           query-based repair, and ``verify_ids=True`` audits every page.
         3. Per-doc incremental pass (unchanged pages -> zero calls);
            changed pages and explicit forced backfill use the safe
            document-level replacement (replace_document).
@@ -441,38 +463,70 @@ class VisualIndexer:
 
         # 2. integrity: state entries must not be trusted blindly
         if not force:
-            has_count = callable(getattr(self.backend, "count", None))
-            has_query = callable(getattr(self.backend, "query_embedding", None))
-            if not (has_count and has_query):
-                # documented limitation, surfaced — never invented success
-                stats.visual_failed.append(
-                    "integrity check unavailable: backend exposes no "
-                    "count()/query_embedding() (documented limitation)"
-                )
+            if verify_ids:
+                # deep audit: every tracked page verified by its OWN
+                # embedding and id (for backends without enumeration)
+                stats += self.repair_missing_vectors()
             else:
-                expected = sum(
-                    len(self.state.get(d)) for d in self.state.doc_ids()
-                )
-                try:
-                    actual = int(self.backend.count())
-                except Exception:
-                    actual = -1
-                if verify_ids:
-                    # explicit identity audit: check EVERY tracked page by
-                    # its expected content-addressed id (catches equal-count
-                    # masking) — one embed per page, so opt-in only
-                    stats += self.repair_missing_vectors()
-                elif self.state.corrupted and actual > 0:
-                    stats.visual_failed.append(
-                        "visual state file was unreadable but the backend "
-                        "still has entries — run 'python -m app.indexing "
-                        "--visual-backfill' to rebuild state safely "
-                        "(content-addressed ids prevent duplicates)"
-                    )
-                elif actual >= 0 and actual != expected:
-                    # either direction of mismatch may hide missing or
-                    # foreign/unrelated vectors — verify by identity
-                    stats += self.repair_missing_vectors()
+                actual_ids = self._enumerate_backend_ids()
+                if actual_ids is not None:
+                    # read-only local membership check: the expected
+                    # content-addressed ids recomputed from state must all
+                    # be present. Equal counts are never treated as proof;
+                    # unrelated/foreign ids are never deleted.
+                    missing = self._expected_ids() - actual_ids
+                    if missing:
+                        stats += self._repair_ids(missing)
+                    if self.state.corrupted and actual_ids:
+                        stats.visual_failed.append(
+                            "visual state file was unreadable but the "
+                            "backend still has entries — run 'python -m "
+                            "app.indexing --visual-backfill' to rebuild "
+                            "state safely (content-addressed ids prevent "
+                            "duplicates)"
+                        )
+                else:
+                    has_count = callable(getattr(self.backend, "count", None))
+                    has_query = callable(
+                        getattr(self.backend, "query_embedding", None))
+                    if not (has_count and has_query):
+                        # documented limitation, surfaced — never invented
+                        # success
+                        stats.visual_failed.append(
+                            "integrity check unavailable: backend exposes "
+                            "no count()/query_embedding() nor id "
+                            "enumeration (documented limitation)"
+                        )
+                    else:
+                        expected = sum(
+                            len(self.state.get(d))
+                            for d in self.state.doc_ids()
+                        )
+                        try:
+                            actual = int(self.backend.count())
+                        except Exception:
+                            actual = -1
+                        if actual >= 0 and actual != expected:
+                            # either direction of mismatch may hide missing
+                            # or foreign/unrelated vectors — verify by
+                            # identity (query-based; enumeration absent)
+                            stats += self.repair_missing_vectors()
+                        elif self.state.corrupted and actual > 0:
+                            stats.visual_failed.append(
+                                "visual state file was unreadable but the "
+                                "backend still has entries — run 'python -m "
+                                "app.indexing --visual-backfill' to rebuild "
+                                "state safely (content-addressed ids prevent "
+                                "duplicates)"
+                            )
+                        else:
+                            stats.visual_failed.append(
+                                "visual membership enumeration unavailable "
+                                "on this backend: equal-count masking is "
+                                "not detectable without "
+                                "reconcile(verify_ids=True) or "
+                                "--visual-backfill (documented limitation)"
+                            )
 
         for doc in self.store.list():
             if force:
@@ -587,6 +641,109 @@ class VisualIndexer:
                     stats.visual_failed.append(
                         f"{doc.doc_id} p{page_no}: repair re-add failed: {exc}"
                     )
+        self.state.save()
+        return stats
+
+    # -- identity helpers (finding 5: equal counts never prove integrity) --
+
+    def _expected_ids(self) -> set:
+        """Content-addressed ids the state claims are indexed, recomputed
+        offline: {doc_id}:{page}:{sha256(image bytes)[:10]} — exactly the
+        format the PR #11 backend derives at add time (VisualHit.id)."""
+        expected = set()
+        for doc_id in self.state.doc_ids():
+            for page_no, entry in self.state.get(doc_id).items():
+                digest = str(entry.get("d", "") or "")
+                if digest:
+                    expected.add(f"{doc_id}:{page_no}:{digest[:10]}")
+        return expected
+
+    def _enumerate_backend_ids(self) -> Optional[set]:
+        """Read-only LOCAL enumeration of the backend's current ids.
+
+        Preference order: an explicit ids capability (``get_ids()`` /
+        ``list_ids()`` / ``ids``), then a ChromaDB-collection-shaped
+        attribute (public ``collection`` or the private ``_collection`` of
+        the PR #11 class) via read-only ``Collection.get(limit=..., ...)``
+        pagination. Never mutates and never calls the embedding service.
+        Returns None when NO capability exists — callers must then report
+        the limitation instead of trusting counts.
+        """
+        backend = self.backend
+        for name in ("get_ids", "list_ids"):
+            fn = getattr(backend, name, None)
+            if callable(fn):
+                try:
+                    return set(str(i) for i in fn())
+                except Exception:
+                    return None
+        raw = getattr(backend, "ids", None)
+        if raw is not None:
+            try:
+                return set(str(i) for i in (raw() if callable(raw) else raw))
+            except Exception:
+                return None
+        for name in ("collection", "_collection"):
+            coll = getattr(backend, name, None)
+            g = getattr(coll, "get", None)
+            if coll is not None and callable(g):
+                try:
+                    ids: list = []
+                    offset = 0
+                    step = 512
+                    while True:
+                        page = g(limit=step, offset=offset)
+                        pids = page.get("ids") or []
+                        ids.extend(str(i) for i in pids)
+                        if len(pids) < step:
+                            break
+                        offset += len(pids)
+                    return set(ids)
+                except Exception:
+                    return None
+        return None
+
+    def _repair_ids(self, missing: set) -> IndexStats:
+        """Re-add pages whose expected content-addressed id is absent from
+        the enumerated backend ids (identity-based, no distance heuristics).
+        Pages no longer present in the manifest are left to the normal
+        incremental pass (they will be purged/replaced there), never
+        reported as repair failures."""
+        stats = IndexStats()
+        for vid in sorted(missing):
+            parts = vid.split(":")
+            if len(parts) != 3:
+                continue
+            doc_id, page_no, _ = parts[0], parts[1], parts[2]
+            try:
+                page_no = int(page_no)
+            except ValueError:
+                continue
+            try:
+                doc = self.store.get(doc_id)
+            except Exception:
+                continue  # unknown doc: orphan state pruned elsewhere
+            try:
+                image_path = dict(self._manifest_pages(doc)).get(page_no)
+            except Exception:
+                continue
+            if image_path is None:
+                continue  # page removed from manifest: normal pass purges
+            try:
+                with Image.open(image_path) as im:
+                    vec = self.image_embedder(resize_for_embedding(im))
+                self.backend.add_image(
+                    doc_id, page_no, image_path, embedding=vec
+                )
+                self.state.set_page(
+                    doc_id, page_no, _file_stat(Path(image_path)),
+                    _file_digest(Path(image_path)),
+                )
+                stats.visual_repaired += 1
+            except Exception as exc:
+                stats.visual_failed.append(
+                    f"{doc_id} p{page_no}: repair re-add failed: {exc}"
+                )
         self.state.save()
         return stats
 
