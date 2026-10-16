@@ -101,8 +101,10 @@ Verify the offline core with:
 pytest tests/unit/test_quiz.py tests/unit/test_quiz_generation.py tests/smoke/test_quiz_flow.py
 ```
 
-Retrieval, real-model generation, the quiz UI (Issue #7), and live end-to-end validation
-remain pending; synthetic evidence in tests is not proof of live grounding.
+Retrieval, real-model generation, the quiz UI (Issue #7), and live end-to-end
+validation remain pending; synthetic evidence in tests is not proof of live
+grounding. The provisional evidence and UI boundary is specified in
+[docs/QUIZ_INTEGRATION.md](docs/QUIZ_INTEGRATION.md).
 
 ## Security (class policy)
 
