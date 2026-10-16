@@ -150,7 +150,8 @@ class CorpusIndexer:
         self.store.register_removal_hook(self.remove_document)
         self._wired = True
 
-    def reconcile(self, visual_backfill: bool = False) -> IndexStats:
+    def reconcile(self, visual_backfill: bool = False,
+                  **visual_kwargs) -> IndexStats:
         """Startup reconciliation (offline-safe apart from missing-vector
         repair, which needs the embedder):
 
@@ -189,10 +190,12 @@ class CorpusIndexer:
                     except Exception as exc:  # pragma: no cover - defensive
                         stats.skipped.append(f"vector:{doc.doc_id}: {exc}")
         stats.vector_chunks = self.vector.count
-        # visual index: incremental by default, forced backfill on request
+        # visual index: incremental by default, forced backfill on request;
+        # extra kwargs (e.g. verify_ids=True identity audit) pass through
         if self.visual is not None:
             try:
-                stats += self.visual.reconcile(force=visual_backfill)
+                stats += self.visual.reconcile(force=visual_backfill,
+                                               **visual_kwargs)
             except Exception as exc:  # pragma: no cover - never block startup
                 stats.visual_failed.append(f"reconcile: {exc}")
         return stats
@@ -391,7 +394,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         indexer.vector.clear()
         indexer.keyword = KeywordIndex()
 
-    # optional visual indexing (is a no-op with a clear reason pre-merge)
+    # optional visual indexing (is a no-op with a clear reason pre-merge);
+    # `reason` is initialized so --keyword-only never sees an unbound name
+    reason = "not attempted"
     if not args.keyword_only:
         from app.visual import production_visual_indexer
 
@@ -419,7 +424,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 file=sys.stderr,
             )
             return 1
-        stats += indexer.visual.reconcile(force=True)
+        if args.doc:
+            # SCOPED backfill: re-place ONLY the selected document, never
+            # the whole library (review finding 8)
+            stats += indexer.visual.replace_document(args.doc)
+        else:
+            stats += indexer.visual.reconcile(force=True)
 
     print(f"Indexed library: {_stats_line(stats)}")
     print(f"Status: {indexer.status()}")
