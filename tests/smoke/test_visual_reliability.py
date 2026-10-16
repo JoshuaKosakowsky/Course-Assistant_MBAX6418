@@ -784,3 +784,155 @@ def test_empty_manifest_purge_failure_keeps_state_and_retries(tmp_path):
     assert not stats2.visual_failed
     assert len(backend.vectors) == 0
     assert rec.doc_id not in indexer.visual.state.doc_ids()
+
+
+
+# --------------------------------------------------------------------------
+# L. REVIEW ROUND 3: ALL re-adds fail after eviction — durable retry
+#    marker, so the doc is never stranded as 'never visual-indexed'
+# --------------------------------------------------------------------------
+
+class FailAllReadds(ChromaLikeBackend):
+    """add_image fails unconditionally while fail_all_adds is True."""
+
+    def __init__(self):
+        super().__init__()
+        self.fail_all_adds = False
+
+    def add_image(self, doc_id, page, image_path, embedding=None):
+        if self.fail_all_adds:
+            raise RuntimeError("embedding service down (simulated)")
+        return super().add_image(doc_id, page, image_path,
+                                 embedding=embedding)
+
+
+def test_all_readd_failures_after_eviction_retry_durably(tmp_path):
+    """REGRESSION (round-3 finding): replace_document() evicts the old
+    vectors, then EVERY add_image() fails -> tracking state is empty.
+    Ordinary reconcile() must still retry (across a restart, no
+    --visual-backfill) instead of treating the doc as never indexed."""
+    store, rec, indexer, backend = _build_custom_env(tmp_path, FailAllReadds)
+    indexer.index_document(rec.doc_id)             # healthy baseline
+    assert len(backend.vectors) == 2
+
+    # mutate page 1 -> doc-level replacement; EMBEDDING works but every
+    # insertion fails (the exact reported failure)
+    img1 = _page_images(store, rec.doc_id)[1]
+    d = pymupdf.open(); pg = d.new_page()
+    pg.draw_rect(pymupdf.Rect(20, 20, 200, 200), color=(1, 0, 0),
+                 fill=(1, 0, 0))
+    pg.get_pixmap(dpi=72).save(str(img1)); d.close()
+    backend.fail_all_adds = True
+
+    stats = indexer.index_document(rec.doc_id)
+    assert stats.visual_failed                       # honest failure
+    assert len(backend.vectors) == 0                 # evicted, nothing back
+    assert indexer.visual.state.get(rec.doc_id) == {}   # all entries dropped
+    # durable marker distinguishes this from 'never visual-indexed'
+    assert rec.doc_id in indexer.visual.state.replacement_failed_docs()
+
+    # STILL down: an ordinary reconcile retries, fails honestly, and keeps
+    # the marker — no fake success, no silent skip
+    stats2 = indexer.reconcile()
+    assert stats2.visual_failed
+    assert len(backend.vectors) == 0
+    assert rec.doc_id in indexer.visual.state.replacement_failed_docs()
+
+    # backend recovers: SIMULATE A PROCESS RESTART (fresh indexer + fresh
+    # backend over the same persisted state file), then a plain reconcile
+    backend.fail_all_adds = False
+    backend2 = FailAllReadds()
+    visual2 = VisualIndexer(backend2, backend2.embed, store,
+                            state=VisualState(tmp_path / "vs.json"))
+    indexer2 = CorpusIndexer(store, embedder=FakeEmbedder(),
+                             persist_dir=tmp_path / "db", visual=visual2)
+    stats3 = indexer2.reconcile()                    # ordinary, no opt-in
+    assert not stats3.visual_failed
+    assert len(backend2.vectors) == 2                # fully recovered
+    assert len(visual2.state.get(rec.doc_id)) == 2
+    # successful recovery clears the pending retry condition
+    assert rec.doc_id not in visual2.state.replacement_failed_docs()
+
+
+def test_first_index_attempt_all_failed_is_retried_not_stranded(tmp_path):
+    """A brand-new doc whose very first indexing attempt fails on every
+    page also gets the retry marker (same stranding disease otherwise)."""
+    store, rec, indexer, backend = _build_custom_env(tmp_path, FailAllReadds)
+    backend.fail_all_adds = True
+    stats = indexer.index_document(rec.doc_id)       # fresh doc, ALL fail
+    assert stats.visual_failed and len(backend.vectors) == 0
+    assert indexer.visual.state.get(rec.doc_id) == {}   # never fake-indexed
+    assert rec.doc_id in indexer.visual.state.replacement_failed_docs()
+
+    backend.fail_all_adds = False
+    stats2 = indexer.reconcile()                     # ordinary retry
+    assert not stats2.visual_failed
+    assert len(backend.vectors) == 2
+    assert len(indexer.visual.state.get(rec.doc_id)) == 2
+    assert rec.doc_id not in indexer.visual.state.replacement_failed_docs()
+
+
+# --------------------------------------------------------------------------
+# M. REVIEW ROUND 3: stale pending-removal markers
+# --------------------------------------------------------------------------
+
+def test_stale_pending_removal_never_purges_returned_document(tmp_path):
+    """A document whose deletion purge FAILED (pending marker) and that is
+    then re-added (content-addressed id) must NOT have its fresh vectors
+    purged by reconcile — the pending marker is stale and dropped."""
+    store, rec, indexer, backend = _build_custom_env(tmp_path,
+                                                     ChromaLikeBackend)
+    indexer.register_hooks()
+    indexer.index_document(rec.doc_id)
+    import shutil
+    shutil.copy(store.corpus_path(rec.doc_id), tmp_path / "reupload.pdf")
+    backend.fail_remove = True
+    store.remove(rec.doc_id)                         # visual purge fails
+    assert rec.doc_id in indexer.visual.state.pending_doc_ids()
+    backend.fail_remove = False
+
+    rec2 = store.add(tmp_path / "reupload.pdf")      # same content -> same id
+    assert rec2.doc_id == rec.doc_id
+
+    stats = indexer.reconcile()
+    assert rec.doc_id not in indexer.visual.state.pending_doc_ids()
+    assert len(backend.vectors) == 2                 # NOT purged
+    assert len(indexer.visual.state.get(rec.doc_id)) == 2
+
+
+def test_direct_index_document_clears_stale_pending_marker(tmp_path):
+    """Recovery through DIRECT index_document() (not reconcile) must also
+    clear the pending-removal marker once pages are written again."""
+    store, rec, indexer, backend = _build_custom_env(tmp_path,
+                                                     ChromaLikeBackend)
+    indexer.register_hooks()
+    indexer.index_document(rec.doc_id)
+    import shutil
+    shutil.copy(store.corpus_path(rec.doc_id), tmp_path / "reupload.pdf")
+    backend.fail_remove = True
+    store.remove(rec.doc_id)
+    assert rec.doc_id in indexer.visual.state.pending_doc_ids()
+    backend.fail_remove = False
+
+    rec2 = store.add(tmp_path / "reupload.pdf")
+    assert rec2.doc_id == rec.doc_id
+    from app.parse import parse_file
+    parse_file(store.corpus_path(rec2.doc_id), rec2.doc_id,
+               store.artifacts_dir / rec2.doc_id)
+
+    # changed page content -> direct index triggers the replacement path
+    img1 = _page_images(store, rec2.doc_id)[1]
+    d = pymupdf.open(); pg = d.new_page()
+    pg.draw_rect(pymupdf.Rect(40, 40, 180, 180), color=(0, 0.5, 1),
+                 fill=(0, 0.5, 1))
+    pg.get_pixmap(dpi=72).save(str(img1)); d.close()
+    stats = indexer.index_document(rec2.doc_id)
+    assert not stats.visual_failed
+    assert rec2.doc_id not in indexer.visual.state.pending_doc_ids()
+
+    # a later reconcile keeps the fresh vectors (no purge)
+    stats2 = indexer.reconcile()
+    assert not stats2.visual_failed
+    assert len(backend.vectors) == 2
+    assert rec2.doc_id not in indexer.visual.state.pending_doc_ids()
+    assert rec2.doc_id not in indexer.visual.state.replacement_failed_docs()

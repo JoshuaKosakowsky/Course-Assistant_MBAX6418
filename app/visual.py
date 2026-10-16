@@ -126,6 +126,7 @@ class VisualState:
         self.path = Path(path) if path else DEFAULT_STATE_PATH
         self._data: Dict[str, Dict[str, Dict[str, object]]] = {}
         self._pending: List[str] = []
+        self._retry: Dict[str, bool] = {}
         self.corrupted = False
         self._lock = threading.Lock()
         if self.path.is_file():
@@ -134,15 +135,18 @@ class VisualState:
                 if isinstance(raw, dict) and "docs" in raw:
                     self._data = raw.get("docs", {}) or {}
                     self._pending = list(raw.get("pending", []) or [])
+                    self._retry = dict(raw.get("retry", {}) or {})
                 else:
                     # legacy layout: the whole object WAS the docs mapping
                     self._data = raw or {}
                     self._pending = []
+                    self._retry = {}
             except Exception:
                 # unreadable state must never block startup; flag it so a
                 # clear backfill hint can be shown instead of silent trust
                 self._data = {}
                 self._pending = []
+                self._retry = {}
                 self.corrupted = True
 
     def get(self, doc_id: str) -> Dict[str, Dict[str, object]]:
@@ -167,6 +171,7 @@ class VisualState:
     def drop_doc(self, doc_id: str) -> None:
         with self._lock:
             self._data.pop(doc_id, None)
+            self._retry.pop(doc_id, None)
 
     def drop_page(self, doc_id: str, page: int) -> None:
         """Remove ONE page's tracking entry (used after a post-eviction
@@ -196,13 +201,37 @@ class VisualState:
         with self._lock:
             return list(self._pending)
 
+    # -- durable replacement-retry marker ----------------------------------
+    # A doc-level replacement that EVICTED the vectors but whose re-adds
+    # ALL failed ends with an empty tracking record — indistinguishable
+    # from a doc that was never visual-indexed. The marker keeps such a
+    # doc retryable by ordinary reconcile() (including after a restart)
+    # instead of stranding it until a manual --visual-backfill.
+
+    def mark_replacement_failed(self, doc_id: str) -> None:
+        with self._lock:
+            self._retry[doc_id] = True
+
+    def clear_replacement_failed(self, doc_id: str) -> None:
+        with self._lock:
+            self._retry.pop(doc_id, None)
+
+    def replacement_failed(self, doc_id: str) -> bool:
+        with self._lock:
+            return bool(self._retry.get(doc_id))
+
+    def replacement_failed_docs(self) -> list[str]:
+        with self._lock:
+            return list(self._retry)
+
     def save(self) -> None:
         with self._lock:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.path.with_suffix(".tmp")
             tmp.write_text(
                 json.dumps(
-                    {"docs": self._data, "pending": self._pending},
+                    {"docs": self._data, "pending": self._pending,
+                     "retry": self._retry},
                     sort_keys=True, indent=1,
                 ),
                 encoding="utf-8",
@@ -286,8 +315,21 @@ class VisualIndexer:
             return stats
         if self._has_changed_page(doc_id, pages):
             return stats + self.replace_document(doc_id)
+        prior_pages = stats.visual_pages
+        prior_failed = len(stats.visual_failed)
         for page_no, image_path in pages:
             stats += self._index_one_page(doc_id, page_no, image_path)
+        if stats.visual_pages > prior_pages:
+            # at least one page landed: stale removal/retry markers moot
+            self.state.clear_replacement_failed(doc_id)
+            self.state.drop_pending(doc_id)
+        elif not self.state.get(doc_id) and \
+                len(stats.visual_failed) > prior_failed:
+            # an indexing attempt was made and EVERY page add failed; the
+            # doc has no vectors and no tracking record — keep it
+            # retryable so a later reconcile re-adds it instead of
+            # treating it as never visual-indexed
+            self.state.mark_replacement_failed(doc_id)
         self.state.save()
         return stats
 
@@ -383,6 +425,23 @@ class VisualIndexer:
                 self.state.drop_page(doc_id, page_no)
         stats.visual_pages = added
         stats.visual_added = added
+        if added == len(ready):
+            # full success: never retry again; a stale pending-removal
+            # marker is moot (ids are content-addressed, so the vectors
+            # just written ARE this document's content)
+            self.state.clear_replacement_failed(doc_id)
+            self.state.drop_pending(doc_id)
+        elif added == 0:
+            # eviction succeeded but NOTHING came back: without a durable
+            # marker the doc would look 'never visual-indexed' and be
+            # stranded until a manual backfill — mark it retryable and
+            # never claim any page as indexed (guarantee preserved)
+            self.state.mark_replacement_failed(doc_id)
+        else:
+            # partial: dropped entries retry additively via the normal
+            # pass; any stale retry marker is no longer needed
+            self.state.clear_replacement_failed(doc_id)
+            self.state.drop_pending(doc_id)
         self.state.save()
         return stats
 
@@ -443,6 +502,13 @@ class VisualIndexer:
 
         # 0. retry failed deletions (durable across restarts)
         for doc_id in self.state.pending_doc_ids():
+            if doc_id in known:
+                # the document is BACK in the library: because vector ids
+                # are content-addressed, its current vectors ARE the
+                # re-added content — the pending removal is stale and
+                # must never purge freshly indexed vectors
+                self.state.drop_pending(doc_id)
+                continue
             try:
                 self.backend.remove_doc(doc_id)
                 self.state.drop_pending(doc_id)
@@ -530,6 +596,13 @@ class VisualIndexer:
 
         for doc in self.store.list():
             if force:
+                stats += self.replace_document(doc.doc_id)
+                continue
+            if self.state.replacement_failed(doc.doc_id):
+                # an earlier replacement EVICTED the vectors but every
+                # re-add failed (tracking state now empty): retry the
+                # doc-level replacement — this is NOT a never
+                # visual-indexed document
                 stats += self.replace_document(doc.doc_id)
                 continue
             pages = self._manifest_pages(doc)
@@ -756,6 +829,7 @@ class VisualIndexer:
         try:
             self.backend.remove_doc(doc_id)
             self.state.drop_doc(doc_id)
+            self.state.drop_pending(doc_id)
         except Exception as exc:
             self.state.add_pending(doc_id)
             stats.visual_failed.append(f"{doc_id}: visual purge failed (queued for retry): {exc}")
