@@ -18,8 +18,8 @@ from pathlib import Path
 
 from PIL import Image
 
-from .embeddings import ClassEmbeddingClient, ImageEmbedder, TextEmbedder, fake_embedder
-from .env import DATA_ROOT
+from .visual_embeddings import ClassEmbeddingClient, ImageEmbedder, TextEmbedder, fake_embedder
+from .config import DATA_ROOT
 
 logger = logging.getLogger(__name__)
 

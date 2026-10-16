@@ -10,8 +10,8 @@ import io
 import pytest
 from PIL import Image
 
-import app.embeddings as em
-from app.embeddings import EMBED_IMAGE_MAX_EDGE, ClassEmbeddingClient, resize_for_embedding
+import app.visual_embeddings as em
+from app.visual_embeddings import EMBED_IMAGE_MAX_EDGE, ClassEmbeddingClient, resize_for_embedding
 
 pytestmark = pytest.mark.unit
 
@@ -95,3 +95,9 @@ def test_embed_image_requires_model_configured(monkeypatch):
     client = ClassEmbeddingClient(base_url="http://class.test", api_key="k")
     with pytest.raises(RuntimeError, match="VISUAL_EMBED_MODEL"):
         client.embed_image(Image.new("RGB", (8, 8)))
+
+
+def test_visual_client_rejects_reserved_port_9000():
+    """Assignment rule: port 9000 is reserved for Hermes agentic work."""
+    with pytest.raises(ValueError, match="reserved"):
+        ClassEmbeddingClient(base_url="http://dobolyi.com:9000/v1", api_key="k")

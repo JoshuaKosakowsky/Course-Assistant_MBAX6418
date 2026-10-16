@@ -2,10 +2,12 @@
 
 Two roles:
 
-- ``ClassEmbeddingClient`` talks to the class endpoints (openai-compatible
-  embeddings API) using .env settings. The exact image input encoding is
-  our working assumption (a JPEG data URI); the e2e tests in
-  tests/e2e/ document the live contract once keys exist.
+- ``ClassEmbeddingClient`` talks to the class visual-embedding endpoint
+  (Qwen3-VL, port 9003 — OpenAI-compatible API) using app.config / .env
+  settings. The exact image input encoding is our working assumption
+  (a JPEG data URI); the e2e tests in tests/e2e/ document the live
+  contract once keys exist. Text-to-image queries use the SAME model so
+  vectors stay comparable with the visual index.
 - ``fake_embedder`` is a deterministic offline stand-in for tests: the
   same image always yields the same vector, different images differ, and
   vectors are unit-length so distance comparisons are meaningful.
@@ -20,13 +22,14 @@ from typing import Callable
 
 from PIL import Image
 
-from .env import (
-    TEXT_EMBED_BASE_URL,
-    TEXT_EMBED_MODEL,
-    VISUAL_EMBED_API_KEY,
-    VISUAL_EMBED_BASE_URL,
-    VISUAL_EMBED_MODEL,
-)
+from . import config
+
+# Module-level copies so tests can monkeypatch them (config is read once).
+VISUAL_EMBED_BASE_URL = config.VISUAL_EMBED_BASE_URL
+VISUAL_EMBED_API_KEY = config.VISUAL_EMBED_API_KEY
+VISUAL_EMBED_MODEL = config.VISUAL_EMBED_MODEL
+TEXT_EMBED_BASE_URL = config.TEXT_EMBED_BASE_URL
+TEXT_EMBED_MODEL = config.TEXT_EMBED_MODEL
 
 ImageEmbedder = Callable[[Image.Image], list[float]]
 TextEmbedder = Callable[[str], list[float]]
@@ -78,9 +81,17 @@ class ClassEmbeddingClient:
     offline behavior inject a fake embedder instead.
     """
 
-    def __init__(self, *, base_url: str | None = None, api_key: str | None = None):
-        self.base_url = base_url or VISUAL_EMBED_BASE_URL
-        self.api_key = api_key or VISUAL_EMBED_API_KEY
+    def __init__(
+        self,
+        *,
+        base_url: str | None = None,
+        api_key: str | None = None,
+        model: str | None = None,
+    ):
+        self.base_url = (base_url or VISUAL_EMBED_BASE_URL).rstrip("/")
+        self.api_key = api_key if api_key is not None else VISUAL_EMBED_API_KEY
+        self.model = model or VISUAL_EMBED_MODEL
+        config.validate_no_reserved_port(self.base_url)
         if not self.base_url or not self.api_key:
             raise RuntimeError(
                 "Class embedding endpoint not configured: set "

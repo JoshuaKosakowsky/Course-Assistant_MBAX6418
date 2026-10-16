@@ -16,7 +16,7 @@ import logging
 import sys
 from pathlib import Path
 
-from .env import DATA_ROOT
+from .config import DATA_ROOT
 from .visual_index import VisualIndex
 
 logger = logging.getLogger(__name__)

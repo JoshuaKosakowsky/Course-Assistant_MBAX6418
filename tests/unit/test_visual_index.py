@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from PIL import Image, ImageDraw
 
-from app.embeddings import fake_embedder
+from app.visual_embeddings import fake_embedder
 from app.visual_index import COLLECTION_NAME, VisualIndex
 
 pytestmark = pytest.mark.unit

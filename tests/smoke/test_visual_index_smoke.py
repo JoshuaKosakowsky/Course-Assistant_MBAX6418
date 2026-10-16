@@ -9,8 +9,8 @@ import pytest
 from pathlib import Path
 from PIL import Image
 
+from app.visual_embeddings import fake_embedder
 from app.visual_index import VisualIndex
-from app.embeddings import fake_embedder
 
 FIXTURE = "tests/fixtures/slide_sample.png"
 
