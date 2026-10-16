@@ -219,9 +219,8 @@ def test_deleted_document_image_rejected(tmp_path):
     store = make_store(tmp_path)
     img = store.artifacts_dir / "doc-a" / "pages" / "page-001.png"
     chunk = mk_chunk(page_no=1, image_path=str(img))
-    # simulate deletion: artifacts removed ahead of the library record
-    import shutil
-    shutil.rmtree(store.artifacts_dir / "doc-a")
+    # simulate deletion: ONLY the image removed (manifest still present)
+    img.unlink()
     path, note = validate_artifact_image(chunk, store)
     assert path is None and "no longer exists" in note
 
@@ -293,3 +292,62 @@ def test_source_position_variants():
         image_included=False, image_source="none", image_verified=False)
     for ranked in ([fused], [rc], [item]):
         assert source_position(ranked, "a.pdf") == 1
+
+
+# 4b. manifest is REQUIRED for artifact verification -------------------------
+# (review finding 2: never label an unrecorded image image_verified=True)
+
+def test_missing_manifest_rejected(tmp_path):
+    store = make_store(tmp_path)
+    (store.artifacts_dir / "doc-a" / "manifest.json").unlink()
+    img = store.artifacts_dir / "doc-a" / "pages" / "page-001.png"
+    chunk = mk_chunk(page_no=1, image_path=str(img))
+    path, note = validate_artifact_image(chunk, store)
+    assert path is None
+    assert "missing" in note and "manifest" in note
+
+
+def test_corrupt_manifest_rejected(tmp_path):
+    store = make_store(tmp_path)
+    m = store.artifacts_dir / "doc-a" / "manifest.json"
+    m.write_text("{ this is not json", encoding="utf-8")
+    img = store.artifacts_dir / "doc-a" / "pages" / "page-001.png"
+    chunk = mk_chunk(page_no=1, image_path=str(img))
+    path, note = validate_artifact_image(chunk, store)
+    assert path is None and "corrupt" in note
+
+
+def test_manifest_missing_page_entry_rejected(tmp_path):
+    store = make_store(tmp_path)
+    m = store.artifacts_dir / "doc-a" / "manifest.json"
+    data = json.loads(m.read_text(encoding="utf-8"))
+    data["pages"][0]["number"] = 2    # only page 2 recorded, page 1 claimed
+    m.write_text(json.dumps(data), encoding="utf-8")
+    img = store.artifacts_dir / "doc-a" / "pages" / "page-001.png"
+    chunk = mk_chunk(page_no=1, image_path=str(img))
+    path, note = validate_artifact_image(chunk, store)
+    assert path is None and "no image record" in note
+
+
+def test_manifest_windows_style_absolute_path_still_verifies(tmp_path):
+    """Platform normalization: backslash absolute records must match the
+    claim (Windows-hosted manifests) without weakening page ownership."""
+    store = make_store(tmp_path)
+    m = store.artifacts_dir / "doc-a" / "manifest.json"
+    data = json.loads(m.read_text(encoding="utf-8"))
+    data["pages"][0]["image_path"] = str(
+        store.artifacts_dir / "doc-a" / "pages" / "page-001.png"
+    ).replace("/", "\\")
+    m.write_text(json.dumps(data), encoding="utf-8")
+    img = store.artifacts_dir / "doc-a" / "pages" / "page-001.png"
+    chunk = mk_chunk(page_no=1, image_path=str(img))
+    path, note = validate_artifact_image(chunk, store)
+    assert path is not None and note == ""
+
+
+def test_valid_manifest_entry_verifies(tmp_path):
+    store = make_store(tmp_path)
+    img = store.artifacts_dir / "doc-a" / "pages" / "page-001.png"
+    chunk = mk_chunk(page_no=1, image_path=str(img))
+    path, note = validate_artifact_image(chunk, store)
+    assert path == str(img) and note == ""

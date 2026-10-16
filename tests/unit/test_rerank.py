@@ -358,11 +358,11 @@ def test_too_many_results_rejected():
 def test_timeout_raises_and_falls_back():
     fused = mk_fused(mk_chunk("a"), mk_chunk("b"))
     client = make_client(FakeTransport(error=requests.exceptions.Timeout()))
-    with pytest.raises(RerankError, match="timeout"):
+    with pytest.raises(RerankError, match="timed out"):
         client.rank("q", ["d"])
     outcome = rerank_fused("q", fused, client)
     assert outcome.applied is False and outcome.fallback is True
-    assert "timeout" in outcome.degraded[0]
+    assert "timed out" in outcome.degraded[0]
 
 
 # 15. authentication/configuration failures ----------------------------------------------
@@ -394,7 +394,9 @@ def test_fallback_keeps_fused_order():
     assert [c.original.chunk.chunk_id for c in outcome.ranked] == ["z", "a", "m"]
     assert all(c.rerank_score is None for c in outcome.ranked)
     assert all("rerank failed" in c.note for c in outcome.ranked)
-    assert outcome.degraded and "connection refused" in outcome.degraded[0]
+    # transport detail is deliberately NOT leaked (may embed credentials);
+    # only the safe generic category is reported (review finding 3)
+    assert outcome.degraded and "connection/transport error" in outcome.degraded[0]
 
 
 # 17. deterministic ranking ties -----------------------------------------------------------
@@ -468,3 +470,33 @@ def test_wrong_document_image_never_reaches_payload(tmp_path):
     assert outcome.ranked[0].image_included is False
     # the OWned candidate (c1, no image path) also stays text-only but harmless
     assert isinstance(docs[1], str)
+
+
+# 14b. credential safety (review finding 3): transport detail must never be
+# interpolated, chained, or echo an API key --------------------------------
+
+def test_transport_error_never_leaks_credentials():
+    # NOTE: the fake token deliberately avoids the repo's secret-shape
+    # hygiene patterns; it is NOT a real-looking key
+    token = "fake-leak-token-abc-12345"
+    client = make_client(api_key=token, transport=FakeTransport(error=RuntimeError(
+        "connection reset while sending Authorization: Bearer " + token)))
+    with pytest.raises(RerankError) as ei:
+        client.rank("q", ["d"])
+    msg = str(ei.value)
+    assert token not in msg and "Bearer" not in msg
+    assert "connection/transport" in msg          # safe generic category
+    assert ei.value.__cause__ is None             # no chained traceback leak
+
+
+def test_malformed_json_error_redacts_and_never_chains():
+    token = "fake-echo-999-xyz"
+    class EchoBadBody:
+        def post(self, *a, **k):
+            return FakeResp(200, '{"echo": "' + token + '" !not-json')
+
+    client = make_client(api_key=token, transport=EchoBadBody())
+    with pytest.raises(RerankError) as ei:
+        client.rank("q", ["d"])
+    assert token not in str(ei.value)
+    assert ei.value.__cause__ is None

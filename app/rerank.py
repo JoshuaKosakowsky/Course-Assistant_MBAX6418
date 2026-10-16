@@ -268,11 +268,20 @@ class RerankClient:
         except RerankError:
             raise
         except Exception as exc:
+            # NEVER interpolate transport exception text or chain the
+            # original exception: a failing transport may embed the
+            # Authorization header / credential in its message or repr,
+            # which would then surface in logs and user-visible errors.
+            # Report a safe generic category only (review finding 3).
             import requests as _requests
 
-            is_timeout = isinstance(exc, (_requests.exceptions.Timeout, TimeoutError))
-            kind = "timeout" if is_timeout else type(exc).__name__
-            raise RerankError(f"reranker request failed ({kind}): {exc}") from exc
+            if isinstance(exc, (_requests.exceptions.Timeout, TimeoutError)):
+                raise RerankError(
+                    f"reranker request timed out after {self.timeout}s"
+                ) from None
+            raise RerankError(
+                "reranker request failed (connection/transport error)"
+            ) from None
 
         if response.status_code != 200:
             detail = ""
@@ -284,8 +293,12 @@ class RerankClient:
 
         try:
             body = response.json()
-        except Exception as exc:
-            raise RerankError(f"reranker returned malformed JSON: {exc}") from exc
+        except Exception:
+            # unparseable body: generic message, no chaining (the decode
+            # error embeds the response text, which could echo request data)
+            raise RerankError(
+                "reranker returned malformed JSON (unparseable body)"
+            ) from None
         scores = _validate_response(body, len(docs), top_n)
         return scores
 

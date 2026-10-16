@@ -551,3 +551,143 @@ def test_production_retrieve_degrades_when_visual_unconfigured(monkeypatch):
         "q", keyword=FakeKw(), visual_index=object())
     assert outcome.stages["visual"] == "degraded"
     assert any("visual" in w for w in outcome.warnings)
+
+
+# ---------------------------------------------------------------------------
+# F1 (review finding 1): a rejected foreign image must NEVER reach the
+# reranker — page_candidate_to_hit may only use pc.image_path (the vetted
+# one), never fall back to pc.visual.image_path (which can still hold the
+# raw un-vetted path when the adapter had no store to verify ownership)
+# ---------------------------------------------------------------------------
+
+def _foreign_store(tmp_path):
+    """doc-a registered; doc-b's artifacts hold a real page image that a
+    visual hit for doc-a might wrongly point into."""
+    store, rec = make_store_with_doc(tmp_path, doc_id="doc-a")
+    bdir = store.artifacts_dir / "doc-b" / "pages"
+    bdir.mkdir(parents=True, exist_ok=True)
+    foreign = bdir / "page-001.png"
+    make_png(foreign)
+    (store.artifacts_dir / "doc-b" / "manifest.json").write_text(
+        json.dumps({"pages": [{"number": 1, "text": "",
+                               "image_path": str(foreign),
+                               "embedded_images": 0}]}),
+        encoding="utf-8")
+    return store, rec, foreign
+
+
+def test_foreign_doc_image_rejected_and_absent_from_rerank_payload(tmp_path):
+    from app.rerank import rerank_fused
+
+    store, rec, foreign = _foreign_store(tmp_path)
+    # an adapter WITHOUT a store cannot verify ownership, so the raw
+    # foreign path survives adaptation (this is the pre-fix danger); the
+    # store-aware fusion + page_candidate_to_hit must then reject it
+    adapter = VisualSourceAdapter(StubSource(hits=[type(
+        "VH", (), {"doc_id": "doc-a", "page": 1,
+                   "image_path": str(foreign), "id": "v1",
+                   "distance": 0.1})()]), store=None)
+    cands = adapter.query_text("q", k=5)
+    assert cands and cands[0].image_path == str(foreign)
+
+    fused = [mk_hit(mk_chunk("c1", doc_id="doc-a", page_no=1,
+                             text="cash flow"), fused_rank=1)]
+    pages = fuse_pages(fused, cands, store=store)
+    pc = pages[0]
+    assert pc.image_path is None                     # foreign image rejected
+    assert any("another document" in w for w in pc.warnings)
+    hit = page_candidate_to_hit(pc)
+    assert hit.chunk.image_path == ""   # REGRESSION: old code re-attached
+                                        # pc.visual.image_path (foreign)
+
+    # reranker payload contains NO image for this hit
+    class T:
+        payloads = []
+
+        def rank(self, query, documents, top_n=None):
+            self.payloads.append(documents)
+            return {i: (len(documents) - i) for i in range(len(documents))}
+
+    t = T()
+    rerank_fused("q", [hit], t, include_images=True)
+    docs = t.payloads[0]
+    assert not isinstance(docs[0], dict) or "image_url" not in str(docs[0])
+    assert "base64" not in str(docs[0])          # foreign bytes never sent
+
+
+def test_visual_only_foreign_candidate_never_leaks_raw_path(tmp_path):
+    store, rec, foreign = _foreign_store(tmp_path)
+    cand = make_visual(doc_id="doc-a", page=1, image_path=str(foreign),
+                       rank=1, distance=0.1)
+    pages = fuse_pages([], [cand], store=store)   # visual-only page
+    assert pages and pages[0].visual is not None
+    assert pages[0].image_path is None
+    hit = page_candidate_to_hit(pages[0])
+    assert hit.chunk.image_path == ""   # NO fallback to pc.visual.image_path
+
+
+# ---------------------------------------------------------------------------
+# F9 (review finding 9): filtering visual retrieval must not starve allowed
+# documents ranked below the global top-k — bounded overfetch, then
+# filter/dedupe/limit, preserving global rank as provenance
+# ---------------------------------------------------------------------------
+
+class CountingSource(StubSource):
+    def count(self):
+        return len(self._hits)
+
+
+def _ranked_hits(n, doc_at_rank=None, doc_id="doc-a"):
+    hits = []
+    for i in range(n):
+        doc = doc_id if (doc_at_rank is not None and i == doc_at_rank - 1) \
+            else "doc-b"
+        hits.append(type("VH", (), {
+            "doc_id": doc, "page": (i % 2) + 1, "image_path": "",
+            "id": f"v{i}", "distance": 0.01 * (i + 1)})())
+    return hits
+
+
+def test_overfetch_text_route_finds_allowed_hit_below_global_top_k():
+    hits = _ranked_hits(14, doc_at_rank=12)   # doc-a only at global rank 12
+    src = CountingSource(hits)
+    out = VisualSourceAdapter(src).query_text("q", k=2, doc_ids={"doc-a"})
+    assert len(out) == 1 and out[0].doc_id == "doc-a"
+    assert src.calls and src.calls[0][2] > 2   # overfetched beyond k
+    assert out[0].rank == 12                   # global rank preserved
+
+
+def test_overfetch_embedding_route_finds_allowed_hit_below_global_top_k():
+    hits = _ranked_hits(14, doc_at_rank=12)
+    src = CountingSource(hits)
+    out = VisualSourceAdapter(src).query_embedding([0.1, 0.2], k=2,
+                                                   doc_ids={"doc-a"})
+    assert len(out) == 1 and out[0].doc_id == "doc-a"
+
+
+def test_overfetch_dedupes_pages_and_honors_doc_filter():
+    hits = _ranked_hits(6, doc_at_rank=None)  # all doc-b
+    # interleave a doc-a page twice (duplicate page at ranks 1 and 5)
+    hits[0] = type("VH", (), {"doc_id": "doc-a", "page": 1, "image_path": "",
+                              "id": "v0", "distance": 0.01})()
+    hits[4] = type("VH", (), {"doc_id": "doc-a", "page": 1, "image_path": "",
+                              "id": "v4", "distance": 0.05})()
+    src = CountingSource(hits)
+    out = VisualSourceAdapter(src).query_text("q", k=5, doc_ids={"doc-a"})
+    pages = {(c.doc_id, c.page) for c in out}
+    assert pages == {("doc-a", 1)}     # duplicate page deduped to one
+    assert out[0].rank == 1            # best (global) rank kept
+
+
+def test_overfetch_deleted_documents_excluded():
+    # deleted docs reach the adapter only through doc_ids (retrieve() passes
+    # the live set); a deleted doc's hits must be excluded with the filter
+    hits = _ranked_hits(6)
+    hits[2] = type("VH", (), {"doc_id": "vanished-doc", "page": 1,
+                              "image_path": "", "id": "vz",
+                              "distance": 0.02})()
+    src = CountingSource(hits)
+    out = VisualSourceAdapter(src).query_text(
+        "q", k=5, doc_ids={"doc-b"})          # vanished-doc NOT in the set
+    assert all(c.doc_id != "vanished-doc" for c in out)
+    assert {c.doc_id for c in out} == {"doc-b"}

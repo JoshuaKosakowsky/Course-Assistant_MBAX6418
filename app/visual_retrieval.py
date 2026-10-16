@@ -96,15 +96,38 @@ class VisualSourceAdapter:
       loses the image with a warning — never a substituted image).
     """
 
-    def __init__(self, source, store=None, max_candidates: int = 10) -> None:
+    def __init__(self, source, store=None, max_candidates: int = 10,
+                 overfetch_factor: int = 5, max_overfetch: int = 100) -> None:
         self.source = source  # duck-typed VisualIndex (PR #11 protocol)
         self.store = store
         self.max_candidates = max_candidates
+        self.overfetch_factor = overfetch_factor
+        self.max_overfetch = max_overfetch
+
+    def _bounded_fetch(self, fetcher, k: int) -> list:
+        """Ask the backend for MORE than ``k`` global hits when a document
+        filter is involved, so eligible results ranked below the global
+        top-k are not starved by the later client-side filter.
+
+        The backend (PR #11 protocol) accepts no ``doc_ids``, so this is a
+        bounded overfetch: fetch up to ``min(total, k*factor+k, cap)``
+        global hits, then filter/dedupe/limit. The cap is an explicit,
+        documented safeguard: on adversarially large corpora where every
+        eligible hit ranks beyond the cap, completeness cannot be
+        guaranteed (honest limitation).
+        """
+        k = max(1, min(int(k), self.max_candidates))
+        try:
+            total = max(0, int(self.source.count()))
+        except Exception:
+            total = k  # no count(): fetch the plain k (no starvation fix)
+        fetch_n = min(total, k * self.overfetch_factor + k, self.max_overfetch)
+        return list(fetcher(fetch_n))
 
     def _query(self, query: str, k: int, doc_ids: Optional[Sequence[str]]) -> list:
-        k = max(1, min(int(k), self.max_candidates))
-        hits = list(self.source.query_text(query, k=k))
-        return self._adapt(hits, k, doc_ids)
+        hits = self._bounded_fetch(
+            lambda n: self.source.query_text(query, k=n), k)
+        return self._adapt(hits, k, doc_ids)[:k]
 
     def query_text(self, query: str, k: int = 5,
                    doc_ids: Optional[Sequence[str]] = None) -> List[VisualCandidate]:
@@ -112,9 +135,9 @@ class VisualSourceAdapter:
 
     def query_embedding(self, embedding: List[float], k: int = 5,
                         doc_ids: Optional[Sequence[str]] = None) -> List[VisualCandidate]:
-        k = max(1, min(int(k), self.max_candidates))
-        hits = list(self.source.query_embedding(embedding, k=k))
-        return self._adapt(hits, k, doc_ids)
+        hits = self._bounded_fetch(
+            lambda n: self.source.query_embedding(embedding, k=n), k)
+        return self._adapt(hits, k, doc_ids)[:k]
 
     def _adapt(self, hits: list, k: int,
                doc_ids: Optional[Sequence[str]]) -> List[VisualCandidate]:
@@ -381,7 +404,11 @@ def page_candidate_to_hit(pc: PageCandidate) -> FusedHit:
         page_no=pc.page_no,
         index_in_page=pc.best_chunk.chunk.index_in_page if pc.best_chunk else 0,
         text=pc.best_chunk.chunk.text if pc.best_chunk else "",
-        image_path=pc.image_path or (pc.visual.image_path if pc.visual else None) or "",
+        # ONLY the vetted page image may reach the reranker: a visual hit
+        # whose image was rejected as belonging to another document leaves
+        # pc.image_path None, and the raw (foreign) path must never be
+        # reattached here (review finding: rejected image sent to reranker).
+        image_path=pc.image_path or "",
     )
     evidence = list(pc.best_chunk.evidence) if pc.best_chunk else []
     if pc.visual is not None:

@@ -141,6 +141,19 @@ class EvidencePack:
 # ---- image validation -----------------------------------------------------
 
 
+def _norm_path(path: str) -> str:
+    """Normalize a filesystem path for manifest-record comparisons.
+
+    Handles Windows absolute paths (backslashes) vs POSIX-form records
+    (forward slashes) and relative/absolute differences WITHOUT weakening
+    ownership: both sides are normalized through os.path.normpath, which
+    on Windows folds separators; on POSIX it is a no-op for such strings.
+    """
+    import os
+
+    return os.path.normpath(str(path).replace("\\", "/"))
+
+
 def validate_artifact_image(
     chunk: Chunk, store, expected_basename: Optional[str] = None
 ) -> Tuple[Optional[str], str]:
@@ -175,24 +188,41 @@ def validate_artifact_image(
                 f"filename {expected!r}"
             )
 
-        # 3. the manifest must record this image for this page
+        # 3. the manifest MUST record this image for this page — a missing,
+        #    corrupt, or unrecorded manifest means the file cannot be marked
+        #    as a verified original page image (review finding: unrecorded
+        #    image accepted as valid)
         manifest = image_dir / "manifest.json"
-        if manifest.is_file():
-            import json
+        import json
 
-            try:
-                pages = json.loads(manifest.read_text(encoding="utf-8")).get("pages", [])
-                recorded = [
-                    str(p.get("image_path", "")) for p in pages
-                    if int(p.get("number", -1)) == chunk.page_no
-                ]
-            except Exception:
-                recorded = []
-            if recorded and chunk.image_path not in recorded:
-                return None, (
-                    f"manifest for {chunk.doc_id} does not record "
-                    f"{chunk.image_path} for page {chunk.page_no}"
-                )
+        if not manifest.is_file():
+            return None, (
+                f"manifest for {chunk.doc_id} is missing: cannot verify "
+                f"{raw} as an original artifact image"
+            )
+        try:
+            pages = json.loads(manifest.read_text(encoding="utf-8"))
+            pages = pages.get("pages", []) if isinstance(pages, dict) else pages
+            recorded = [
+                _norm_path(str(p.get("image_path", "")))
+                for p in pages
+                if int(p.get("number", -1)) == chunk.page_no
+            ]
+        except Exception:
+            return None, (
+                f"manifest for {chunk.doc_id} is corrupt/unreadable: cannot "
+                f"verify {raw} for page {chunk.page_no}"
+            )
+        if not recorded:
+            return None, (
+                f"manifest for {chunk.doc_id} has no image record for "
+                f"page {chunk.page_no}"
+            )
+        if _norm_path(chunk.image_path) not in recorded:
+            return None, (
+                f"manifest for {chunk.doc_id} does not record "
+                f"{chunk.image_path} for page {chunk.page_no}"
+            )
 
     # 4. file must exist and decode as PNG/JPEG
     if not raw.is_file():
