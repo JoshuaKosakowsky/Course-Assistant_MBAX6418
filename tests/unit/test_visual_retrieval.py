@@ -459,6 +459,7 @@ def test_unified_visual_embedder_uses_9003_model(monkeypatch):
     import app.config as cfg
     monkeypatch.setattr(cfg, "VISUAL_EMBED_BASE_URL", "http://x.test:9003/v1")
     monkeypatch.setattr(cfg, "VISUAL_EMBED_API_KEY", "test-key")
+    monkeypatch.setattr(cfg, "VISUAL_EMBED_MODEL", "Qwen/Qwen3-VL-Embedding-2B")
     calls = {}
 
     class FakeResp:
