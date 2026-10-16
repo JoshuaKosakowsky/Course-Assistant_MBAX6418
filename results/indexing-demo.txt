@@ -1,0 +1,46 @@
+==============================================================================
+Indexing workflow demo — Issue #2 (offline FakeEmbedder; live endpoint
+behavior covered in pytest -m e2e)
+==============================================================================
+  added finance.pdf: doc_id=0c35513593… pages=2 chunks=2
+  added marketing.pdf: doc_id=fad26c9a16… pages=2 chunks=2
+  added operations.pdf: doc_id=a24585d1bf… pages=2 chunks=2
+
+Index status: {'library_docs': 3, 'keyword_chunks': 6, 'vector_chunks': 6, 'collection': 'course_text_chunks'}
+
+  'free cash flow'       keyword -> finance.pdf p1 [0c355135934d9711::p0001:…]
+                         vector  -> finance.pdf p1 [0c355135934d9711::p0001:…]
+  'brand positioning'    keyword -> marketing.pdf p1 [fad26c9a1695f31d::p0001:…]
+                         vector  -> marketing.pdf p1 [fad26c9a1695f31d::p0001:…]
+  'inventory management' keyword -> operations.pdf p1 [a24585d1bf52ca13::p0001:…]
+                         vector  -> operations.pdf p1 [a24585d1bf52ca13::p0001:…]
+
+After removing finance.pdf (removal hooks purge both indexes):
+  keyword 'free cash flow' -> [('operations.pdf', 0.474)]
+  vector  'free cash flow' -> (none)
+  status: {'library_docs': 2, 'keyword_chunks': 4, 'vector_chunks': 4, 'collection': 'course_text_chunks'}
+
+Restart simulation (new indexer instance, same store+chroma dir):
+  reconcile stats errors: none
+  BM25 rebuilt; status: {'library_docs': 2, 'keyword_chunks': 4, 'vector_chunks': 4, 'collection': 'course_text_chunks'}
+  vector persists; search 'inventory management' -> operations.pdf
+
+=== SECTION B: live CLI against the demo collection (real 9002 embeddings) ===
+Indexed library: docs=2 pages=4 chunks=4 keyword_chunks=4 vector_chunks=4
+Status: {'library_docs': 2, 'keyword_chunks': 4, 'vector_chunks': 4, 'collection': 'course_text_chunks'}
+--- rerun with --reindex (clears the 64-dim demo collection first) ---
+Indexed library: docs=2 pages=4 chunks=4 keyword_chunks=4 vector_chunks=4
+Status: {'library_docs': 2, 'keyword_chunks': 4, 'vector_chunks': 4, 'collection': 'course_text_chunks'}
+CLI_EXIT=0
+
+=== SECTION B0 (historical capture, earlier same session): live CLI against a
+collection still holding 64-dim FakeEmbedder demo vectors. Documents the
+graceful degradation path that motivated the dimension guard ---
+Indexed library: docs=2 pages=4 chunks=4 keyword_chunks=4 vector_chunks=0 [skipped(2)]
+Status: {'library_docs': 2, 'keyword_chunks': 0, 'vector_chunks': 0, 'collection': 'course_text_chunks'}
+Skipped (embedding service):
+  ~ vector:a24585d1bf52ca13: dimension mismatch: this collection is locked to 64D but the embedder produced 2048D. Run `python -m app.indexing --reindex` (or clear the collection) before switching embedding models.
+  ~ vector:fad26c9a1695f31d: dimension mismatch: this collection is locked to 64D but the embedder produced 2048D. Run `python -m app.indexing --reindex` (or clear the collection) before switching embedding models.
+(The Status line with keyword_chunks=0 reflects the CLI status-report bug
+fixed later that day: a second fresh indexer instance reported its empty
+in-memory BM25. After the fix, status reports the indexing instance.)
