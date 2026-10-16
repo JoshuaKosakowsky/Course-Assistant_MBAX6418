@@ -7,9 +7,11 @@ course materials (slides, syllabus, and other files downloaded from Canvas).
 Built on hybrid RAG: keyword search + text embeddings + visual embeddings,
 with source-grounded evidence — including original page/slide images.
 
-**Status:** Phase 0 — repo & collaboration scaffold. No end-to-end pipeline yet.
-Work breakdown, ownership, and completion checks live in
-[PLAN.md](PLAN.md) and the GitHub issues.
+**Status:** Phase 2 text chunking, BM25 keyword search, and ChromaDB
+semantic indexing are implemented on this branch (PR #13). The complete
+end-to-end Q&A/quiz pipeline has not yet been integrated. Work breakdown,
+ownership, and completion checks live in [PLAN.md](PLAN.md) and the GitHub
+issues.
 
 ---
 
