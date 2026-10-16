@@ -67,6 +67,10 @@ Status legend: `pending` (not started) · `in progress` · `done`.
 - [ ] Scoring + per-question feedback linking to document/page/section/excerpt/image
 - [ ] Gradio tab 2: quiz flow (generate → answer → score → review)
 - **Definition of done:** full quiz flow works; answer key stable across runs of the same generation; solutions provably hidden pre-answer; feedback shows original evidence.
+- **In progress (Issue #6):** Offline evidence-scoped quiz contract, seeded
+  answer placement, concealment, scoring, and source feedback tested with
+  synthetic evidence. Retrieval/model integration, Issue #7 UI, and live
+  end-to-end verification are outstanding; do not close #6 yet.
 
 ## Phase 6 — Polish, testing, comparison
 - [ ] One design comparison (proposal: rerank vs. no-rerank on answer quality; alternatives: chunk size 250/500/1000, hybrid vs. keyword-only) — scripted, results saved in `results/`
