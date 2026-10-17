@@ -19,6 +19,7 @@ class QuizController:
     def __init__(self, provider=None):
         self.provider = provider
         self._sessions = {}
+        self._generations = {}
         self._lock = Lock()
 
     def _get_session_id(self, request: gr.Request) -> str | None:
@@ -43,6 +44,8 @@ class QuizController:
         with self._lock:
             self._expire()
             self._sessions.pop(sid, None)
+            generation = self._generations.get(sid, 0) + 1
+            self._generations[sid] = generation
         if not materials:
             return ("Please select at least one course document.", *empty, "", "")
         if self.provider is None:
@@ -74,10 +77,17 @@ class QuizController:
                 else:
                     controls.append(empty[i])
             with self._lock:
+                if self._generations.get(sid) != generation:
+                    return ("A newer quiz request has replaced this one.", *empty, "", "")
                 self._sessions[sid] = (session, time.monotonic())
             return (f"Quiz ready: {len(questions)} questions.", *controls, "", "")
-        except (TypeError, ValueError) as exc:
-            return (f"Unable to generate quiz: {exc}", *empty, "", "")
+        except Exception:
+            return (
+                "Unable to generate quiz. Please check your selections and try again.",
+                *empty,
+                "",
+                "",
+            )
 
     def finish(self, reveal: bool, answers, request: gr.Request):
         sid = self._get_session_id(request)
@@ -117,5 +127,10 @@ class QuizController:
             ])
             if evidence.get("excerpt"):
                 lines.append(f"Evidence: {evidence['excerpt']}")
+            elif evidence.get("image_path"):
+                lines.append(
+                    "Evidence: Original image reference available; "
+                    "image preview is not connected in this interface."
+                )
             lines.append("")
         return summary, "\n\n".join(lines)

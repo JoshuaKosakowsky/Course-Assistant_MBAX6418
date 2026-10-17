@@ -326,7 +326,7 @@ def build_ui(store: DocumentStore | None = None, indexer=None, quiz_provider=Non
             api_name="lookup_submit",
         )
 
-        add_button.click(
+        add_event = add_button.click(
             lambda f, store=store, indexer=indexer: add_file(
                 store, f, indexer
             ),
@@ -335,19 +335,19 @@ def build_ui(store: DocumentStore | None = None, indexer=None, quiz_provider=Non
             api_name="add_file",
         )
 
-        add_button.click(
+        add_event.then(
             lambda: gr.update(choices=_choices(store), value=[]),
             inputs=[], outputs=[quiz_materials], api_name=False,
         )
 
-        remove_button.click(
+        remove_event = remove_button.click(
             lambda c, store=store: remove_selected(store, c),
             inputs=[document_dropdown],
             outputs=[library_table, document_dropdown, status],
             api_name="remove_selected",
         )
 
-        remove_button.click(
+        remove_event.then(
             lambda: gr.update(choices=_choices(store), value=[]),
             inputs=[], outputs=[quiz_materials], api_name=False,
         )
