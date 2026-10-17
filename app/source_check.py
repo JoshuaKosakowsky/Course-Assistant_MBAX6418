@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Sequence
 
 from .qna_schema import QnaParseError, Source, coerce_bool
@@ -26,6 +27,8 @@ STOPWORDS = frozenset(
 )
 
 _CONTENT_WORD = re.compile(r"[a-z]{3,}")
+_NUMBER = re.compile(r"\d+(?:\.\d+)?")
+_NEGATION = re.compile(r"\b(?:no|not|never|none|without|hardly|scarcely)\b|n't\b")
 
 
 def content_terms(text: str) -> set[str]:
@@ -42,19 +45,40 @@ def overlap_fraction(answer: str, excerpt: str) -> float:
     return len(answer_terms & excerpt_terms) / len(answer_terms)
 
 
+def factual_conflict(answer: str, excerpt: str) -> bool:
+    """True when the answer asserts facts the excerpt cannot support.
+
+    The overlap heuristic ignores numbers and stopwords (e.g. ``not``), so
+    "the exam is on October 20" and "the exam is on October 15" share every
+    content term. Numbers and explicit negation are compared explicitly:
+    any answer number absent from the excerpt, or a negator present only on
+    one side, means support cannot be certified.
+    """
+    answer_numbers = _NUMBER.findall(answer)
+    if answer_numbers and any(n not in _NUMBER.findall(excerpt) for n in answer_numbers):
+        return True
+    answer_negation = set(_NEGATION.findall(answer))
+    return bool(answer_negation) and not (answer_negation & set(_NEGATION.findall(excerpt)))
+
+
 @dataclass(frozen=True)
 class SourceCheck:
     index: int
     overlap: float
     verdict: str  # "supported" | "weak" | "unsupported"
+    conflict: bool = False  # factual-conflict detected; verdict capped at "weak"
 
 
-def _verdict(overlap: float) -> str:
+def _verdict(overlap: float, conflict: bool = False) -> str:
+    if overlap < WEAK_THRESHOLD:
+        return "unsupported"
+    if conflict:
+        # Content overlaps but the facts conflict (numbers, dates,
+        # negation) — support can never be certified affirmatively.
+        return "weak"
     if overlap >= SUPPORTED_THRESHOLD:
         return "supported"
-    if overlap >= WEAK_THRESHOLD:
-        return "weak"
-    return "unsupported"
+    return "weak"
 
 
 def check_sources(answer: str, sources: tuple[Source, ...]) -> tuple[SourceCheck, ...]:
@@ -62,7 +86,10 @@ def check_sources(answer: str, sources: tuple[Source, ...]) -> tuple[SourceCheck
     checks = []
     for i, source in enumerate(sources):
         overlap = overlap_fraction(answer, source.excerpt)
-        checks.append(SourceCheck(index=i, overlap=overlap, verdict=_verdict(overlap)))
+        conflict = factual_conflict(answer, source.excerpt)
+        checks.append(
+            SourceCheck(index=i, overlap=overlap, verdict=_verdict(overlap, conflict), conflict=conflict)
+        )
     return tuple(checks)
 
 
@@ -71,11 +98,19 @@ class CitationCheck:
     index: int
     valid: bool
     reason: str
+    image_path: str | None = None  # evidence-derived; never the model's raw path
 
 
 def _normalize(text: str) -> str:
     """Case- and whitespace-collapsed text for excerpt authenticity checks."""
     return " ".join(text.split()).lower()
+
+
+def _path_key(path: str | None) -> str:
+    """POSIX-normalized path for comparisons (evidence paths are as_posix())."""
+    if not path:
+        return ""
+    return str(Path(path)).replace("\\", "/")
 
 
 def verify_citations(
@@ -88,6 +123,11 @@ def verify_citations(
     inside that evidence entry's excerpt. Fabricated or mismatched
     citations are flagged so the orchestrator can drop them — a model
     must never be allowed to invent sources.
+
+    ``image_path`` is never trusted from the model: a cited path is kept
+    only when it matches the matching evidence entry's own path, and the
+    returned check carries the evidence-derived path (``None`` when the
+    citation had none or the path was fabricated).
     """
     checks = []
     for i, src in enumerate(sources):
@@ -97,9 +137,33 @@ def verify_citations(
                 CitationCheck(i, False, f"no evidence for ({src.document}, page {src.page})")
             )
         elif any(_normalize(src.excerpt) in _normalize(e.excerpt) for e in matches):
-            checks.append(
-                CitationCheck(i, True, f"excerpt matches evidence ({src.document}, page {src.page})")
-            )
+            if src.image_path:
+                evidence_path = next(
+                    (e.image_path for e in matches if e.image_path and _path_key(e.image_path) == _path_key(src.image_path)),
+                    None,
+                )
+                if evidence_path is None:
+                    checks.append(
+                        CitationCheck(
+                            i,
+                            True,
+                            f"excerpt matches evidence ({src.document}, page {src.page}); "
+                            "image path discarded (not in evidence)",
+                        )
+                    )
+                else:
+                    checks.append(
+                        CitationCheck(
+                            i,
+                            True,
+                            f"excerpt matches evidence ({src.document}, page {src.page})",
+                            image_path=evidence_path,
+                        )
+                    )
+            else:
+                checks.append(
+                    CitationCheck(i, True, f"excerpt matches evidence ({src.document}, page {src.page})")
+                )
         else:
             checks.append(
                 CitationCheck(
@@ -140,13 +204,14 @@ def judge_sources(
         except (QnaParseError, json.JSONDecodeError, TypeError, ValueError):
             supported = None  # fall back to the heuristic below
         heuristic = overlap_fraction(answer, source.excerpt)
+        conflict = factual_conflict(answer, source.excerpt)
         if supported is None:
-            final = _verdict(heuristic)
+            final = _verdict(heuristic, conflict)
         elif supported:
-            final = "supported"
+            final = "supported" if not conflict else "weak"
         else:
             final = "unsupported"
-        results.append(SourceCheck(index=i, overlap=heuristic, verdict=final))
+        results.append(SourceCheck(index=i, overlap=heuristic, verdict=final, conflict=conflict))
     return tuple(results)
 
 
