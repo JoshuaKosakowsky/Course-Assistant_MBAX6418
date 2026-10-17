@@ -112,8 +112,16 @@ def test_cleanup_orphans_keeps_recorded_directories(store, tmp_path):
     f = tmp_path / "a.pdf"
     f.write_bytes(b"keep me")
     doc = store.add(f)
+    artifacts = store.artifacts_dir / doc.doc_id
+    artifacts.mkdir(parents=True)
+    artifact = artifacts / "page-001.txt"
+    artifact.write_text("synthetic page text", encoding="utf-8")
+
     assert store.cleanup_orphans() == []
-    assert (store.artifacts_dir / doc.doc_id).is_dir() or True
+    assert artifacts.is_dir()
+    assert artifact.read_text(encoding="utf-8") == "synthetic page text"
+    assert (store.corpus_dir / doc.doc_id).is_dir()
+    assert store.corpus_path(doc.doc_id).read_bytes() == b"keep me"
     assert store.get(doc.doc_id).doc_id == doc.doc_id
 
 
