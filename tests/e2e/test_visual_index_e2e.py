@@ -21,15 +21,7 @@ pytestmark = pytest.mark.e2e
 
 
 def _endpoint_configured() -> bool:
-    model = config.VISUAL_EMBED_MODEL or ""
-    return bool(
-        config.VISUAL_EMBED_BASE_URL
-        and config.VISUAL_EMBED_API_KEY
-        # Known template placeholder: live calls would 404, so treat as
-        # unconfigured instead of attempting the endpoint.
-        and "dummy" not in model.lower()
-        and "replace-with" not in model.lower()
-    )
+    return config.visual_embed_endpoint_configured()
 
 
 @pytest.fixture(autouse=True)
