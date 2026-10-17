@@ -49,7 +49,7 @@ RUNNER = r"""
 import json, sys, tempfile
 from pathlib import Path
 
-from app.visual_index import VisualIndex, VisualHit, _image_id
+from app.visual_index import VisualIndex, VisualHit
 from app.embeddings import fake_embedder
 
 from PIL import Image, ImageDraw
