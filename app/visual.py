@@ -44,10 +44,8 @@ MAX_EMBED_EDGE = 512  # px on the longest side (verified 9003 context limit)
 # Reason strings surfaced in startup messages and tests.
 VISUAL_UNAVAILABLE = "app.visual_index not available (PR #11 unmerged)"
 EXCERPT_REQUIRED_NOTE = (
-    "PR #14's Source requires a non-empty 'excerpt'; image-only pages keep "
-    "their image in the evidence pack but are excluded from Source output "
-    "rather than fabricating text. Future PR #14 revision should allow "
-    "Source(excerpt=None) for visual-only evidence."
+    "Image-only sources preserve excerpt=None and require verified originals "
+    "plus an explicit visual answer-support check."
 )
 
 

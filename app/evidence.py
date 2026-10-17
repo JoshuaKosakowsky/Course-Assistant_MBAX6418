@@ -5,13 +5,13 @@ structure: ranked text excerpts + validated original page images + full
 source details, while keeping the richer internal provenance for
 debugging and evaluation.
 
-Compatibility with teammate PR #14 (app/qna_schema.py, unmerged):
+Q&A compatibility (app/qna_schema.py):
 
     @dataclass(frozen=True)
     class Source:
         document: str
         page: int
-        excerpt: str
+        excerpt: str | None
         image_path: str | None = None
 
 ``EvidencePack.to_sources()`` returns exactly that shape
@@ -19,11 +19,9 @@ Compatibility with teammate PR #14 (app/qna_schema.py, unmerged):
 dependency on the unmerged branch: after PR #14 merges, swap
 ``SourceLike`` for ``qna_schema.Source`` — the fields are identical.
 
-Visual-only pages (image, no extractable text) cannot be represented as a
-PR #14 ``Source`` because its ``excerpt`` is a required non-empty str;
-the exported ``EXCERPT_REQUIRED_NOTE`` constant documents this and the
-future interface change (``excerpt: str | None``) that would allow
-image-only evidence.
+Visual-only pages retain excerpt=None and a verified original image.
+Their answer support must be checked by the optional vision verifier;
+image ownership alone does not establish that an answer is correct.
 
 Image validation is MANIFEST-AUTHORITATIVE: a filename pattern alone
 (e.g. ``page-001.png``) does not prove ownership, so every artifact
@@ -46,13 +44,9 @@ from app.chunking import Chunk
 from app.fusion import FusedHit, RankedEvidence
 from app.rerank import RerankedCandidate, _mime_type
 
-# PR #14 compatibility note (see module docstring): its Source.excerpt is a
-# required non-empty str, so image-only pages cannot be represented there.
 EXCERPT_REQUIRED_NOTE = (
-    "PR #14's Source requires a non-empty 'excerpt'; image-only pages keep "
-    "their image in the evidence pack but are excluded from Source output "
-    "rather than fabricating text. Future PR #14 revision should allow "
-    "Source(excerpt=None) for visual-only evidence."
+    "Image-only sources preserve excerpt=None and require verified originals "
+    "plus an explicit visual answer-support check."
 )
 
 __all__ = [
@@ -90,7 +84,7 @@ class SourceLike:
 
     document: str
     page: int
-    excerpt: str
+    excerpt: Optional[str]
     image_path: Optional[str] = None
 
 
@@ -106,21 +100,17 @@ class EvidencePack:
     # ---- PR #14-compatible output ---------------------------------------
 
     def to_sources(self) -> List[SourceLike]:
-        """Q&A prompt/citation sources (exactly PR #14's Source shape).
-
-        Items without an extractable excerpt are excluded here (PR #14
-        requires a non-empty ``excerpt``) and stay visible in ``items``
-        with an explicit warning instead.
-        """
+        """Retain text or a verified original; never invent missing text."""
         sources = []
         for item in self.items:
-            if not item.excerpt or not item.excerpt.strip():
+            excerpt = item.excerpt if item.excerpt and item.excerpt.strip() else None
+            if excerpt is None and not (item.image_verified and item.image_path):
                 continue
             sources.append(
                 SourceLike(
                     document=item.filename,
                     page=item.page_no,
-                    excerpt=item.excerpt,
+                    excerpt=excerpt,
                     # ONLY verified original page images are citable;
                     # unverified visual claims stay candidates, never
                     # presented as originals.

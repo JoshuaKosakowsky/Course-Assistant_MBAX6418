@@ -82,8 +82,7 @@ def test_quiz_material_refresh_waits_for_document_mutations(store):
             if event.get("trigger_after") == event_index
         ]
 
-        assert len(refreshes) == 1
-        refresh = refreshes[0]
+        assert len(refreshes) == 2
 
         # The quiz selector must be updated after the mutation.
         quiz_selector = next(
@@ -91,8 +90,13 @@ def test_quiz_material_refresh_waits_for_document_mutations(store):
             for component in demo.config["components"]
             if component.get("props", {}).get("label") == "Course materials"
         )
-        assert refresh["outputs"] == [quiz_selector]
-        assert refresh["trigger_only_on_success"] is False
+        assert any(refresh["outputs"] == [quiz_selector] for refresh in refreshes)
+        question_selector = next(
+            component["id"] for component in demo.config["components"]
+            if component.get("props", {}).get("label") == "Materials for your question"
+        )
+        assert any(refresh["outputs"] == [question_selector] for refresh in refreshes)
+        assert all(refresh["trigger_only_on_success"] is False for refresh in refreshes)
 
 
 def test_delayed_document_mutations_refresh_choices_after_completion(
