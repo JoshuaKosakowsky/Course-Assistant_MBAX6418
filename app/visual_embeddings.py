@@ -4,9 +4,10 @@ Two roles:
 
 - ``ClassEmbeddingClient`` talks to the class visual-embedding endpoint
   (Qwen3-VL, port 9003 — OpenAI-compatible API) using app.config / .env
-  settings. The exact image input encoding is our working assumption
-  (a JPEG data URI); the e2e tests in tests/e2e/ document the live
-  contract once keys exist. Text-to-image queries use the SAME model so
+  settings. Images are sent as multimodal ``messages`` with an
+  ``image_url`` content part — the input shape verified against the live
+  endpoint (a plain data-URI ``input`` string gets tokenized as text and
+  exceeds context). Text-to-image queries use the SAME model so
   vectors stay comparable with the visual index.
 - ``fake_embedder`` is a deterministic offline stand-in for tests: the
   same image always yields the same vector, different images differ, and
@@ -103,11 +104,47 @@ class ClassEmbeddingClient:
         """Embed one page/slide image via the class visual endpoint.
 
         The image is downscaled (512px longest edge) for the embedding
-        request; the caller's original file is never modified.
+        request; the caller's original file is never modified. The class
+        endpoint embeds images through the documented multimodal
+        ``messages`` shape; a plain ``input`` string would be tokenized as
+        text and exceed the model context window (live HTTP 400).
         """
         if not VISUAL_EMBED_MODEL:
             raise RuntimeError("Set VISUAL_EMBED_MODEL in .env (see .env.example).")
-        return self._embed([image_to_data_uri(resize_for_embedding(image))], VISUAL_EMBED_MODEL)
+        return self._embed_image(
+            image_to_data_uri(resize_for_embedding(image)), VISUAL_EMBED_MODEL
+        )
+
+    def _embed_image(
+        self, image_uri: str, model: str, base: str | None = None
+    ) -> list[float]:
+        """Embed one data-URI image via the documented multimodal shape."""
+        import requests
+
+        url = (base or self.base_url).rstrip("/") + "/embeddings"
+        payload = {
+            "model": model,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": image_uri}},
+                    ],
+                },
+            ],
+        }
+        try:
+            response = requests.post(
+                url,
+                json=payload,
+                headers={"Authorization": f"Bearer {self.api_key}"},
+                timeout=60,
+                allow_redirects=False,
+            )
+            response.raise_for_status()
+            return response.json()["data"][0]["embedding"]
+        except Exception:
+            raise RuntimeError("Visual embedding service request failed.") from None
 
     def embed_text_visual(self, text: str) -> list[float]:
         """Embed free text in the SAME space as images (Qwen3-VL, port 9003).
