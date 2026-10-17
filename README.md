@@ -102,24 +102,37 @@ fidelity beyond extraction/render completion is not guaranteed.
 
 ## Quiz engine (Issue #6, in progress)
 
-`app.quiz` and `app.quiz_generation` provide a standalone, offline quiz
-contract. `QuizRequest` selects materials, an optional topic, count, and seed;
-`generate_quiz(request, evidence, generator)` accepts supplied evidence and
-an injected question generator. The generator is currently a test double, **not**
-a class-endpoint client. `QuizSession.student_view()` exposes only prompts and
-choices until `submit()` or explicit `reveal()`; scoring and source-backed
-feedback follow. Answer placement is stable for the same seed and questions.
+`app.quiz` and `app.quiz_generation` provide the offline quiz core.
+`QuizProvider(retriever, generator)` now implements `QuizRequest -> Quiz` for
+server-side UI use. It restricts retrieval and generated questions to unique
+selected document IDs. `VisionQuizGenerator(QuizVisionClient())` supplies the
+strict JSON vision-model adapter; configure `BASE_URL_VISION`, `CLASS_API_KEY`,
+and `VISION_MODEL` in the gitignored `.env`. Port 9000 is blocked.
 
-Verify the offline core with:
+The model cites server-assigned evidence IDs, not invented source paths.
+Malformed responses and network failures produce safe errors, never fake
+questions. `QuizSession.student_view()` exposes only prompts and choices until
+`submit()` or explicit `reveal()`; scoring and source-bearing feedback follow.
+Answer placement is stable for the same seed **and identical generated
+questions**; a remote model is not guaranteed to regenerate identical output.
+
+Verify the core and adapter offline with:
 
 ```bash
-pytest tests/unit/test_quiz.py tests/unit/test_quiz_generation.py tests/smoke/test_quiz_flow.py
+pytest tests/unit/test_quiz.py tests/unit/test_quiz_generation.py tests/unit/test_quiz_model.py tests/unit/test_quiz_provider.py tests/smoke/test_quiz_flow.py tests/smoke/test_quiz_provider_flow.py
 ```
 
-Retrieval, real-model generation, the quiz UI (Issue #7), and live end-to-end
-validation remain pending; synthetic evidence in tests is not proof of live
-grounding. The provisional evidence and UI boundary is specified in
-[docs/QUIZ_INTEGRATION.md](docs/QUIZ_INTEGRATION.md).
+Tests inject fake retrieval/model responses and synthetic page images. The
+adapter has **not** been exercised against a live class model. Production
+retrieval/UI hookup, factual-answer evaluation, cross-generation replay, and
+live end-to-end validation remain pending; valid source identity is not proof
+that a generated answer is correct. From eight retrieved candidates, the
+provider retains at most four image-bearing references plus text-only evidence,
+in ranked order; this is sampled coverage, not an exhaustive document review.
+Topic filtering remains literal excerpt matching (not semantic filtering), and
+excludes image-only pages when a topic
+is provided. See [docs/QUIZ_INTEGRATION.md](docs/QUIZ_INTEGRATION.md) for the
+integration sketch, image trust boundary, and remaining acceptance gates.
 
 ## Security (class policy)
 
@@ -219,3 +232,25 @@ Keys live in the gitignored `.env` (see `.env.example`):
 - Commit conventions: [docs/COMMITS.md](docs/COMMITS.md)
 - Test tiers: [docs/TESTING.md](docs/TESTING.md) — `pytest` = unit + smoke;
   `pytest -m e2e` needs class keys.
+
+## Chunk-Size Comparison
+
+We evaluated three BM25 retrieval chunk sizes (250, 500,
+and 1,000 characters) using a repeatable synthetic dataset.
+
+| Chunk Size | Chunks | Accuracy@1 | Hit Rate@3 | MRR@3 |
+|------------|--------|------------|------------|-------|
+| 250        | 25     | 100%       | 100%       | 1.000 |
+| 500        | 13     | 100%       | 100%       | 1.000 |
+| 1000       | 7      | 100%       | 100%       | 1.000 |
+
+All three configurations performed equally on the
+synthetic evaluation queries. Smaller chunks produced
+more index entries without improving retrieval accuracy.
+
+These findings do not establish the best chunk size for
+real course materials because the evaluation used
+synthetic data and BM25 retrieval only.
+
+See [comparison results](results/chunk-size-comparison.csv)
+and [detailed findings](results/chunk-size-comparison.md).
