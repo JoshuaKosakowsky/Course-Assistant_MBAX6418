@@ -1,8 +1,10 @@
 # Quiz integration contract (Issues #6, #7; PR #15 dependency)
 
-This contract is **offline and provisional**. It does not import the unmerged
-retrieval or UI branches, contact a class endpoint, or prove model grounding.
-It belongs on Issue #6's `feat/quiz-engine` branch; Issue #7 owns the Gradio UI.
+This contract separates the offline quiz core and model/provider slice from
+remaining live-model and UI work. Retrieval from PR #15 is now merged and its
+real classes are exercised offline with synthetic PDFs and a fake model.
+Issue #6 owns the callable provider; Issue #7 owns the Gradio UI. These tests
+do not prove live grounding.
 
 ## Evidence from PR #15
 
@@ -21,9 +23,10 @@ tuple of `EvidenceRef`:
 - `doc_id` is preserved from each item. Items without a valid `doc_id`
   convert to `None` and can never match a document selection (fails closed).
 - This adapter does **not** validate file ownership, manifest membership, or
-  whether a generated answer is factually supported. PR #15 must fix its
-  pending manifest/provenance findings and supply validated evidence before
-  production use. Synthetic unit tests validate only the shape and gates.
+  whether a generated answer is factually supported. The production retriever
+  must supply manifest-validated evidence before use. Synthetic unit tests
+  validate the adapter's shape and gates. A separate synthetic-PDF smoke test
+  exercises the merged retrieval implementation; neither proves live grounding.
 - `QuizRequest.materials` contains **unique document IDs** (`EvidenceRef.doc_id` /
   `EvidenceItem.doc_id`), never filenames. The document store permits
   different files with identical filenames (records are keyed by content
@@ -38,6 +41,86 @@ tuple of `EvidenceRef`:
   questions and exact evidence identity. The future generator must return
   `Question` records with four options, a correct index and explanation; the
   adapter does not itself establish factual support.
+
+## Callable provider and vision-model adapter
+
+`QuizProvider(retriever, generator)` in `app/quiz_provider.py` implements the
+callable expected by Issue #7: `provider(QuizRequest) -> Quiz`. Construction
+makes no network calls. A request:
+
+1. Rejects invalid configuration (one to five questions, document IDs, topic).
+2. Calls `retriever.retrieve(query, doc_ids=request.materials, top_k=8,
+   include_images=True)`; the outcome must expose `.evidence` as above.
+3. Rechecks selected document IDs and the existing literal topic filter.
+4. From that filtered, ranked pool, keeps the first four image-bearing
+   references and **all** text-only references, preserving their original
+   relative order. Excess image-bearing references are omitted entirely,
+   even if they also have text; retained references keep their original image
+   paths and provenance. The model adapter's four-image limit is unchanged.
+5. Passes this identical subset to `generate_quiz` for both model input and
+   exact evidence-identity validation, so a question cannot cite an omitted
+   reference. Count validation precedes returning a server-held `Quiz`.
+
+With no topic, retrieval uses the generic query `key concepts definitions
+methods examples`. The retrieval pool remains `top_k=8`; the four-image
+budget may further reduce the evidence available for generation. Selection
+uses retrieval rank deterministically, not per-document quotas. This is a
+bounded sample, **not** comprehensive coverage of all selected documents,
+and does not guarantee every selected document contributes a question.
+Empty/unsupported evidence stops before model usage.
+
+`VisionQuizGenerator(QuizVisionClient())` in `app/quiz_model.py` implements
+question generation. The client reads `BASE_URL_VISION`, `CLASS_API_KEY`, and
+`VISION_MODEL` from existing server-side config. The URL must be HTTP(S) with
+no embedded credentials, query, or fragment; reserved port 9000 is refused.
+No keys, source paths, or raw server/transport errors belong in browser output.
+
+The model receives evidence records labeled `E1`, `E2`, etc., and local image
+content when present. Evidence is untrusted input, not instructions. It must
+return only JSON with a `questions` list, each item containing:
+
+```json
+{"prompt":"...","options":["...","...","...","..."],
+ "correct_index":0,"explanation":"...","evidence_id":"E1"}
+```
+
+Source document/page/excerpt/image fields come from the server's original
+reference, never model-provided paths. Invalid output is rejected; there is
+no fabricated-question fallback. A structurally valid citation **does not
+prove** the answer or explanation is factually supported. Adversarial model
+output and factual correctness still require separate evaluation.
+
+The image boundary trusts the production retriever to supply validated local
+artifact paths. Do not expose these APIs to arbitrary client-created packs
+or paths. Images are encoded in memory for the model; original paths remain
+unchanged for feedback. The UI must validate/serve original evidence safely.
+
+Integration sketch **after** retrieval and UI prerequisites land (these imports
+are deliberately not made by this branch):
+
+```python
+from app.quiz_model import QuizVisionClient, VisionQuizGenerator
+from app.quiz_provider import QuizProvider
+# retrieval_service = build_retrieval_service(initialized_indexer)
+provider = QuizProvider(retrieval_service, VisionQuizGenerator(QuizVisionClient()))
+# build_ui(store, indexer, quiz_provider=provider)
+```
+
+A seed fixes answer placement only for identical generated questions/options.
+Temperature zero is not a guarantee of identical remote generations. Retain the
+actual generated quiz/key server-side; cross-generation reproducibility needs
+explicit caching/replay or a separately verified service guarantee. This slice
+does not claim that acceptance criterion has been fully established.
+
+Offline checks:
+
+```bash
+python -m pytest tests/unit/test_quiz_model.py tests/unit/test_quiz_provider.py tests/smoke/test_quiz_provider_flow.py -q
+```
+
+These use injected fake responses and synthetic artifacts. They exercise image
+encoding, selected-material scope, schema validation, error concealment, and
+session scoring/reveal, **not** live endpoint correctness or a real Gradio flow.
 
 ## Issue #7 UI event boundary
 
