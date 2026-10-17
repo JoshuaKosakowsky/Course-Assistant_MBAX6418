@@ -30,6 +30,7 @@ def test_generate_answer_score_and_reveal_source():
     result = session.submit([quiz.answer_key[0]])
     assert (result["score"], result["total"]) == (1, 1)
     assert result["feedback"][0]["evidence"] == {
+        "doc_id": "week5",
         "document": "Week 5", "page": 9,
         "excerpt": "BM25 is keyword retrieval",
         "image_path": "artifacts/week5/page-009.png",
