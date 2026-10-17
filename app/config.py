@@ -43,6 +43,24 @@ VISUAL_EMBED_BASE_URL = os.getenv("BASE_URL_VISUAL_EMBED", "http://dobolyi.com:9
 VISUAL_EMBED_MODEL = os.getenv("VISUAL_EMBED_MODEL", "Qwen/Qwen3-VL-Embedding-2B")
 VISUAL_EMBED_API_KEY = os.getenv("CLASS_API_KEY", "")
 
+
+def visual_embed_endpoint_configured() -> bool:
+    """True when the visual-embedding endpoint is usable for live e2e calls.
+
+    Endpoint URL, API key, and a nonempty model name are all required. An
+    empty or template-placeholder model value must fail the gate so e2e
+    tests skip instead of firing live requests (an empty model with a
+    valid endpoint+key used to slip past the check).
+    """
+    model = (VISUAL_EMBED_MODEL or "").strip()
+    if not (VISUAL_EMBED_BASE_URL and VISUAL_EMBED_API_KEY and model):
+        return False
+    lowered = model.lower()
+    # Known template placeholder: live calls would 404, so treat as
+    # unconfigured instead of attempting the endpoint.
+    return "dummy" not in lowered and "replace-with" not in lowered
+
+
 APP_HOST = os.getenv("APP_HOST", "127.0.0.1")
 APP_PORT = int(os.getenv("APP_PORT", "7860"))
 

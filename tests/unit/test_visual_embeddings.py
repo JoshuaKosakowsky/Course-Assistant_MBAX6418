@@ -8,6 +8,7 @@ import base64
 import io
 
 import pytest
+import requests
 from PIL import Image
 
 import app.visual_embeddings as em
@@ -39,17 +40,61 @@ def test_resize_for_embedding_never_mutates_original():
 def test_embed_image_sends_resized_copy(monkeypatch):
     captured = {}
 
-    def fake_embed(self, inputs, model, base=None):
-        captured["input"] = inputs[0]
+    def fake_embed_image(self, image_uri, model, base=None):
+        captured["image_uri"] = image_uri
+        captured["model"] = model
         return [0.0]
 
     monkeypatch.setattr(em, "VISUAL_EMBED_MODEL", "qwen3-vl")
-    monkeypatch.setattr(ClassEmbeddingClient, "_embed", fake_embed)
+    monkeypatch.setattr(ClassEmbeddingClient, "_embed_image", fake_embed_image)
 
     big = Image.new("RGB", (2048, 1024), (200, 30, 30))
     ClassEmbeddingClient(base_url="http://class.test", api_key="k").embed_image(big)
 
-    raw = base64.b64decode(captured["input"].split(",", 1)[1])
+    assert captured["model"] == "qwen3-vl"
+    raw = base64.b64decode(captured["image_uri"].split(",", 1)[1])
+    decoded = Image.open(io.BytesIO(raw))
+    assert decoded.size == (512, 256)
+
+
+def test_embed_image_sends_multimodal_messages_payload(monkeypatch):
+    """The class visual endpoint embeds an image only via the documented
+    multimodal ``messages`` shape; a plain ``input`` string is tokenized as
+    text and exceeds the context window (HTTP 400 in live probes)."""
+    captured = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"data": [{"embedding": [0.0]}]}
+
+    def fake_post(url, **kwargs):
+        captured["url"] = url
+        captured["kwargs"] = kwargs
+        return FakeResponse()
+
+    monkeypatch.setattr(em, "VISUAL_EMBED_MODEL", "qwen3-vl")
+    monkeypatch.setattr(requests, "post", fake_post)
+
+    client = ClassEmbeddingClient(base_url="http://class.test/v1", api_key="k")
+    client.embed_image(Image.new("RGB", (64, 64), (10, 20, 30)))
+
+    assert captured["url"] == "http://class.test/v1/embeddings"
+    body = captured["kwargs"]["json"]
+    assert body["model"] == "qwen3-vl"
+    assert "input" not in body
+    content = body["messages"][0]["content"]
+    assert content[0]["type"] == "image_url"
+    assert "data:image/jpeg;base64," in content[0]["image_url"]["url"]
+    # The image is downscaled for the embedding request; original remains.
+    big = Image.new("RGB", (2048, 1024), (200, 30, 30))
+    captured.clear()
+    client.embed_image(big)
+    body = captured["kwargs"]["json"]
+    uri = body["messages"][0]["content"][0]["image_url"]["url"]
+    raw = base64.b64decode(uri.split(",", 1)[1])
     decoded = Image.open(io.BytesIO(raw))
     assert decoded.size == (512, 256)
 
