@@ -78,3 +78,16 @@ def test_evidence_adapter_retains_only_verified_image_only_pages(source):
                         image_verified=True)
     assert EvidencePack("q", [item]).to_sources()[0].excerpt is None
     assert EvidencePack("q", [replace(item, image_verified=False)]).to_sources() == []
+
+
+def test_visual_claim_absent_from_slide_heading_requires_explicit_image_verdict(source):
+    heading = Source(source.document, source.page, "Color diagram", source.image_path)
+    result = json.dumps({"answer": "The square is not green.", "grounded": True,
+                         "sources": [vars(heading)]})
+    # Negation is not in the extracted heading; the original image can still
+    # support the claim. Text-only checks cannot establish visual entailment.
+    assert not QnaOrchestrator(Model(result)).answer("Describe the color", (heading,)).grounded
+    assert not QnaOrchestrator(Model(result), visual_verifier=lambda *args: False).answer(
+        "Describe the color", (heading,)).grounded
+    assert QnaOrchestrator(Model(result), visual_verifier=lambda *args: True).answer(
+        "Describe the color", (heading,)).grounded
