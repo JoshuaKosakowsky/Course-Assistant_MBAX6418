@@ -7,11 +7,11 @@ Canvas. It combines keyword search, text embeddings, and visual embeddings
 with evidence packs containing excerpts and original page/slide images.
 Backend modules support source-grounded Q&A and multiple-choice quizzes.
 
-**Status:** The implementation work for Phases 1–6 is merged into `main`;
-this Phase 7 README update is on `docs/phase7-readme` for
-[issue #9](https://github.com/JoshuaKosakowsky/Course-Assistant_MBAX6418/issues/9),
-which remains open. Phase completion does not mean every UI flow is connected.
-The Ask Questions tab is a placeholder, and quiz generation needs explicit
+**Status:** Backend components for Phases 1–6 are merged into `main`, and
+CI is green; that does not mean every phase is fully integrated or
+validated. Issues #7 (Gradio student flow) and #8 (automated checks +
+design comparison) still have outstanding acceptance items. The Ask
+Questions tab is a placeholder, and quiz generation needs explicit
 provider wiring at startup. See [limitations](#limitations-and-untested-areas).
 
 **CI is green:** the checked `main` run reports **838 passed, 2 skipped,
@@ -57,7 +57,6 @@ artifacts describe those historical runs, not the current suite.
 Use **Python 3.12**, the version exercised by CI, and Git. Install LibreOffice
 only if you want automatic PPTX conversion. Bring your own authorized course
 materials: the local `data/` corpus and real credentials are not committed.
-Access to a private repository requires an authorized GitHub account.
 
 ```bash
 git clone https://github.com/JoshuaKosakowsky/Course-Assistant_MBAX6418.git
@@ -231,12 +230,13 @@ This existing committed screenshot shows **Lookup**, using a generated
 synthetic PDF. It demonstrates source lookup, not generated Q&A or a live quiz.
 [lookup-check.md](results/lookup-check.md) records the browser verification.
 
-![Live retrieval evidence — Lookup answering with the class retrieval services on a synthetic deck](results/lookup-evidence-demo.png)
+![Lookup — BM25 keyword retrieval on a synthetic deck](results/lookup-evidence-demo.png)
 
-A second **Lookup** capture (2026-10-17) from a live run against the class
-keyword + embedding retrieval services with a three-slide synthetic deck:
+A second **Lookup** capture (2026-10-17) on a three-slide synthetic deck:
 the query "What does RAG combine?" returns a verbatim excerpt with document
-name and page number. Content shown is synthetic only.
+name and page number. Lookup runs BM25 keyword search (`app/lookup.py`),
+so this demonstrates keyword retrieval on an indexed synthetic PDF — not
+the hybrid retrieval pipeline. Content shown is synthetic only.
 
 Q&A and quiz flow screenshots are being captured and will be added after the
 corresponding flows are connected and verified. They are not included here;
