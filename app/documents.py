@@ -165,6 +165,19 @@ class DocumentStore:
             raise DocumentNotFoundError(doc_id)
         return files[0]
 
+    def is_parsed(self, doc_id: str) -> bool:
+        """True when this document's manifest exists and names the same
+        doc_id. parse_file() writes the manifest only after every page and
+        image landed, so this is the completion marker for ingestion —
+        a registered-but-unparsed document (failed or interrupted import)
+        must not be reported as an existing duplicate."""
+        manifest = self.artifacts_dir / doc_id / "manifest.json"
+        try:
+            record = json.loads(manifest.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return False
+        return record.get("doc_id") == doc_id
+
     def remove(self, doc_id: str) -> None:
         """Delete a document and ALL of its searchable content: corpus copy,
         parsed artifacts, and the library record. The record is always
