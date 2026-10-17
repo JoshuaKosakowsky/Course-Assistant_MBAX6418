@@ -50,7 +50,7 @@ import json, sys, tempfile
 from pathlib import Path
 
 from app.visual_index import VisualIndex, VisualHit
-from app.embeddings import fake_embedder
+from app.visual_embeddings import fake_embedder
 
 from PIL import Image, ImageDraw
 
