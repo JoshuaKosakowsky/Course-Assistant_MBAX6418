@@ -3,6 +3,8 @@ from types import SimpleNamespace
 
 import json
 
+import base64
+
 from app.documents import DocumentStore
 
 import pytest
@@ -179,7 +181,8 @@ def test_verified_original_image_is_displayed(tmp_path):
     pages = store.artifacts_dir / doc.doc_id / "pages"
     pages.mkdir(parents=True)
     original = pages / "page-001.png"
-    original.write_bytes(b"\x89PNG\r\n\x1a\n")
+    original.write_bytes(base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ" "AAAADUlEQVQIHWP4z8DwHwAFgAI/ScL/nwAAAABJRU5ErkJggg=="
+    ))
 
     manifest = {
         "doc_id": doc.doc_id,
@@ -193,6 +196,7 @@ def test_verified_original_image_is_displayed(tmp_path):
         evidence = EvidenceRef(
             "lecture.pdf",
             1,
+            excerpt="The diagram labels component A.",
             image_path=str(original),
             doc_id=doc.doc_id,
         )
@@ -214,5 +218,6 @@ def test_verified_original_image_is_displayed(tmp_path):
 
     assert score == "Answers revealed without grading."
     assert "Verified original page image shown below" in feedback
+    assert "Evidence: The diagram labels component A." in feedback
     assert len(images) == 1
     assert images[0][0] == str(original)

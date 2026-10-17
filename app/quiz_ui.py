@@ -139,7 +139,7 @@ class QuizController:
             ])
             if evidence.get("excerpt"):
                 lines.append(f"Evidence: {evidence['excerpt']}")
-            elif evidence.get("image_path"):
+            if evidence.get("image_path"):
                 original = (
                     verified_original_image(self.store, evidence)
                     if self.store is not None
