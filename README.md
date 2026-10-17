@@ -219,3 +219,25 @@ Keys live in the gitignored `.env` (see `.env.example`):
 - Commit conventions: [docs/COMMITS.md](docs/COMMITS.md)
 - Test tiers: [docs/TESTING.md](docs/TESTING.md) — `pytest` = unit + smoke;
   `pytest -m e2e` needs class keys.
+
+## Chunk-Size Comparison
+
+We evaluated three BM25 retrieval chunk sizes (250, 500,
+and 1,000 characters) using a repeatable synthetic dataset.
+
+| Chunk Size | Chunks | Accuracy@1 | Hit Rate@3 | MRR@3 |
+|------------|--------|------------|------------|-------|
+| 250        | 25     | 100%       | 100%       | 1.000 |
+| 500        | 13     | 100%       | 100%       | 1.000 |
+| 1000       | 7      | 100%       | 100%       | 1.000 |
+
+All three configurations performed equally on the
+synthetic evaluation queries. Smaller chunks produced
+more index entries without improving retrieval accuracy.
+
+These findings do not establish the best chunk size for
+real course materials because the evaluation used
+synthetic data and BM25 retrieval only.
+
+See [comparison results](results/chunk-size-comparison.csv)
+and [detailed findings](results/chunk-size-comparison.md).

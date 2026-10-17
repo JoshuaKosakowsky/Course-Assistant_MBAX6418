@@ -1,0 +1,156 @@
+[
+  {
+    "chunk_size": 250,
+    "query": "retrieval augmented generation citations",
+    "expected_page": 1,
+    "retrieved_pages": [
+      1,
+      1,
+      1
+    ],
+    "correct_at_1": true,
+    "correct_at_3": true,
+    "rank": 1
+  },
+  {
+    "chunk_size": 250,
+    "query": "precision recall evaluation ground truth",
+    "expected_page": 2,
+    "retrieved_pages": [
+      2,
+      2,
+      2
+    ],
+    "correct_at_1": true,
+    "correct_at_3": true,
+    "rank": 1
+  },
+  {
+    "chunk_size": 250,
+    "query": "data leakage unseen test set",
+    "expected_page": 3,
+    "retrieved_pages": [
+      3,
+      3,
+      3
+    ],
+    "correct_at_1": true,
+    "correct_at_3": true,
+    "rank": 1
+  },
+  {
+    "chunk_size": 250,
+    "query": "clinical decision support human oversight",
+    "expected_page": 4,
+    "retrieved_pages": [
+      4,
+      4,
+      4
+    ],
+    "correct_at_1": true,
+    "correct_at_3": true,
+    "rank": 1
+  },
+  {
+    "chunk_size": 500,
+    "query": "retrieval augmented generation citations",
+    "expected_page": 1,
+    "retrieved_pages": [
+      1,
+      1,
+      1
+    ],
+    "correct_at_1": true,
+    "correct_at_3": true,
+    "rank": 1
+  },
+  {
+    "chunk_size": 500,
+    "query": "precision recall evaluation ground truth",
+    "expected_page": 2,
+    "retrieved_pages": [
+      2,
+      2,
+      2
+    ],
+    "correct_at_1": true,
+    "correct_at_3": true,
+    "rank": 1
+  },
+  {
+    "chunk_size": 500,
+    "query": "data leakage unseen test set",
+    "expected_page": 3,
+    "retrieved_pages": [
+      3,
+      3,
+      3
+    ],
+    "correct_at_1": true,
+    "correct_at_3": true,
+    "rank": 1
+  },
+  {
+    "chunk_size": 500,
+    "query": "clinical decision support human oversight",
+    "expected_page": 4,
+    "retrieved_pages": [
+      4,
+      4,
+      4
+    ],
+    "correct_at_1": true,
+    "correct_at_3": true,
+    "rank": 1
+  },
+  {
+    "chunk_size": 1000,
+    "query": "retrieval augmented generation citations",
+    "expected_page": 1,
+    "retrieved_pages": [
+      1,
+      1
+    ],
+    "correct_at_1": true,
+    "correct_at_3": true,
+    "rank": 1
+  },
+  {
+    "chunk_size": 1000,
+    "query": "precision recall evaluation ground truth",
+    "expected_page": 2,
+    "retrieved_pages": [
+      2,
+      2,
+      3
+    ],
+    "correct_at_1": true,
+    "correct_at_3": true,
+    "rank": 1
+  },
+  {
+    "chunk_size": 1000,
+    "query": "data leakage unseen test set",
+    "expected_page": 3,
+    "retrieved_pages": [
+      3,
+      3
+    ],
+    "correct_at_1": true,
+    "correct_at_3": true,
+    "rank": 1
+  },
+  {
+    "chunk_size": 1000,
+    "query": "clinical decision support human oversight",
+    "expected_page": 4,
+    "retrieved_pages": [
+      4,
+      3,
+      3
+    ],
+    "correct_at_1": true,
+    "correct_at_3": true,
+    "rank": 1
+  }
+]

@@ -1,0 +1,4 @@
+chunk_size,chunk_overlap,chunk_count,query_count,accuracy_at_1,hit_rate_at_3,mrr_at_3
+250,64,25,4,1.0,1.0,1.0
+500,64,13,4,1.0,1.0,1.0
+1000,64,7,4,1.0,1.0,1.0
