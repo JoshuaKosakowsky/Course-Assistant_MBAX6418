@@ -112,10 +112,41 @@ provider = QuizProvider(retrieval_service, VisionQuizGenerator(QuizVisionClient(
 ```
 
 A seed fixes answer placement only for identical generated questions/options.
-Temperature zero is not a guarantee of identical remote generations. Retain the
-actual generated quiz/key server-side; cross-generation reproducibility needs
-explicit caching/replay or a separately verified service guarantee. This slice
-does not claim that acceptance criterion has been fully established.
+Temperature zero is not a guarantee of identical remote generations. The
+optional server-side replay wrapper below retains an actual generated quiz/key;
+it does not make the remote model deterministic.
+
+### Bounded server-side replay
+
+Wrap the existing provider once per server process, not once per request:
+
+```python
+from app.quiz_replay import QuizReplayProvider
+replay_provider = QuizReplayProvider(store, provider, max_entries=128)
+# build_ui(store, indexer, quiz_provider=replay_provider)
+```
+
+This backend slice does not change production startup or Johana's UI branch.
+Keep the wrapper and returned `Quiz` on the server. Create a new `QuizSession`
+for each student/attempt; never cache a completed session, score, or browser
+state. Sharing an immutable quiz must not share completion state.
+
+Replay is limited to identical requests and unchanged selected materials.
+Fingerprint checks cover selected library records, corpus bytes, and parsed
+artifacts, including source images, before reuse and around generation.
+Removed/unavailable materials fail closed rather than returning old answers.
+Failed or invalid generations are not retained. The cache is bounded (default
+128 quizzes) and process-local: eviction, explicit invalidation, and server
+restart end replay availability. A later generation can differ. This is not
+permanent reproducibility, disk persistence, or cross-worker coordination.
+
+The wrapper serializes calls, including generation, to coalesce simultaneous
+identical requests. This trades throughput for a small, auditable concurrency
+boundary. Fingerprints do not establish factual support or replace the
+retriever's evidence validation; before/after checks cannot make external
+filesystem mutations atomic with returning a quiz. Retrieval/model/config
+changes require a fresh wrapper or explicit cache invalidation. The server's
+trusted document store remains the authority, not browser-supplied paths.
 
 Offline checks:
 
