@@ -27,6 +27,7 @@ from .embeddings import EmbeddingsError, TextEmbeddingClient
 from .indexing import CorpusIndexer
 from .ingest import add_and_parse
 from .parse import ConversionError, UnsupportedFormatError
+from .quiz_ui import QuizController
 
 SUPPORTED_LABEL = (
     "**Supported formats:** PDF (direct) · PPTX (auto-converted — needs "
@@ -134,56 +135,178 @@ def remove_selected(store: DocumentStore, choice: str | None) -> tuple[pd.DataFr
     return _library_df(store), _choices(store), message
 
 
-def build_ui(store: DocumentStore | None = None, indexer=None) -> gr.Blocks:
+def build_ui(store: DocumentStore | None = None, indexer=None, quiz_provider=None) -> gr.Blocks:
     store = store or DocumentStore()
+    quiz_controller = QuizController(quiz_provider)
+
     if indexer is not None:
-        # Real application wiring: removals purge both indexes; startup
-        # reconciles BM25 + ChromaDB with the library (offline-safe).
         indexer.register_hooks()
         try:
             indexer.reconcile()
-        except Exception as exc:  # pragma: no cover - never block startup
+        except Exception as exc:
             print(f"index reconciliation failed: {exc}")
-    with gr.Blocks(title="Course Assistant — Manage Materials") as demo:
-        gr.Markdown("# Course Assistant — Manage Course Materials")
-        gr.Markdown(SUPPORTED_LABEL)
 
-        with gr.Row():
-            file_input = gr.File(label="Upload a course file", file_types=[".pdf", ".pptx"])
-            add_button = gr.Button("Add to library", variant="primary")
-
-        library_table = gr.Dataframe(
-            label="Library", headers=TABLE_COLUMNS, interactive=False
+    with gr.Blocks(title="Course Assistant") as demo:
+        gr.Markdown("# Course Assistant")
+        gr.Markdown(
+            "Study your course materials, ask questions, and practice with quizzes."
         )
 
-        with gr.Row():
-            document_dropdown = gr.Dropdown(
-                label="Select a document to remove",
-                choices=[],
-                interactive=True,
-                allow_custom_value=True,
-            )
-            remove_button = gr.Button("Remove selected", variant="stop")
+        with gr.Tabs():
+            with gr.Tab("Course Materials"):
+                gr.Markdown(SUPPORTED_LABEL)
 
-        status = gr.Markdown("Ready.")
+                with gr.Row():
+                    file_input = gr.File(
+                        label="Upload a course file",
+                        file_types=[".pdf", ".pptx"],
+                    )
+                    add_button = gr.Button(
+                        "Add to library", variant="primary"
+                    )
+
+                library_table = gr.Dataframe(
+                    label="Library",
+                    headers=TABLE_COLUMNS,
+                    interactive=False,
+                )
+
+                with gr.Row():
+                    document_dropdown = gr.Dropdown(
+                        label="Select a document to remove",
+                        choices=[],
+                        interactive=True,
+                        allow_custom_value=True,
+                    )
+                    remove_button = gr.Button(
+                        "Remove selected", variant="stop"
+                    )
+
+                status = gr.Markdown("Ready.")
+
+            with gr.Tab("Ask Questions"):
+                gr.Markdown(
+                    "Ask questions about your uploaded course materials."
+                )
+                gr.Markdown(
+                    "*Evidence-backed Q&A will be connected here.*"
+                )
+
+            with gr.Tab("Practice Quiz"):
+                gr.Markdown("### Create a practice quiz")
+                gr.Markdown(
+                    "Choose your course materials and customize your quiz."
+                )
+
+                quiz_materials = gr.CheckboxGroup(
+                    label="Course materials",
+                    choices=_choices(store),
+                    info="Select one or more uploaded documents.",
+                )
+
+                quiz_topic = gr.Textbox(
+                    label="Topic (optional)",
+                    placeholder="e.g., Retrieval-Augmented Generation",
+                )
+
+                with gr.Row():
+                    quiz_count = gr.Slider(
+                        minimum=1,
+                        maximum=5,
+                        step=1,
+                        value=3,
+                        label="Number of questions",
+                    )
+                    quiz_seed = gr.Number(
+                        value=42,
+                        precision=0,
+                        label="Quiz seed",
+                    )
+
+                generate_button = gr.Button(
+                    "Generate Practice Quiz",
+                    variant="primary",
+                )
+
+                quiz_status = gr.Markdown(
+                    "Select your materials to get started."
+                )
+
+                gr.Markdown("### Questions")
+                quiz_answers = [
+                    gr.Radio(label=f"Question {i + 1}", choices=[],
+                             visible=False, interactive=True)
+                    for i in range(5)
+                ]
+                with gr.Row():
+                    submit_button = gr.Button("Submit Answers", variant="primary")
+                    reveal_button = gr.Button("Reveal Answers")
+                quiz_score = gr.Markdown()
+                quiz_feedback = gr.Markdown()
+
+        generate_button.click(
+            quiz_controller.generate,
+            inputs=[quiz_materials, quiz_topic, quiz_count, quiz_seed],
+            outputs=[quiz_status, *quiz_answers, quiz_score, quiz_feedback],
+            api_name=False,
+        )
+
+        def submit_quiz(a1, a2, a3, a4, a5, request: gr.Request):
+            return quiz_controller.finish(False, (a1, a2, a3, a4, a5), request)
+
+        def reveal_quiz(a1, a2, a3, a4, a5, request: gr.Request):
+            return quiz_controller.finish(True, (a1, a2, a3, a4, a5), request)
+
+        submit_button.click(
+            submit_quiz, inputs=quiz_answers,
+            outputs=[quiz_score, quiz_feedback], api_name=False,
+        )
+        reveal_button.click(
+            reveal_quiz, inputs=quiz_answers,
+            outputs=[quiz_score, quiz_feedback], api_name=False,
+        )
 
         add_button.click(
-            lambda f, store=store, indexer=indexer: add_file(store, f, indexer),
+            lambda f, store=store, indexer=indexer: add_file(
+                store, f, indexer
+            ),
             inputs=[file_input],
             outputs=[library_table, document_dropdown, status],
             api_name="add_file",
         )
+
+        add_button.click(
+            lambda: gr.update(choices=_choices(store), value=[]),
+            inputs=[], outputs=[quiz_materials], api_name=False,
+        )
+
         remove_button.click(
             lambda c, store=store: remove_selected(store, c),
             inputs=[document_dropdown],
             outputs=[library_table, document_dropdown, status],
             api_name="remove_selected",
         )
+
+        remove_button.click(
+            lambda: gr.update(choices=_choices(store), value=[]),
+            inputs=[], outputs=[quiz_materials], api_name=False,
+        )
+
         demo.load(
-            lambda store=store: (_library_df(store), _choices(store), "Ready."),
+            lambda: gr.update(choices=_choices(store), value=[]),
+            outputs=[quiz_materials], api_name=False,
+        )
+
+        demo.load(
+            lambda store=store: (
+                _library_df(store),
+                _choices(store),
+                "Ready.",
+            ),
             outputs=[library_table, document_dropdown, status],
             api_name="load_library",
         )
+
     return demo
 
 
