@@ -39,6 +39,25 @@ def test_env_is_not_tracked():
 
 
 @pytest.mark.unit
+def test_class_endpoint_file_stays_local():
+    assert not any(
+        Path(rel).name == "class-endpoints.txt" for rel in _tracked_files()
+    ), "class-endpoints.txt may contain credentials and must never be tracked"
+    result = subprocess.run(
+        ["git", "check-ignore", "--no-index", "--",
+         "class-endpoints.txt", "notes/class-endpoints.txt"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0
+    assert set(result.stdout.splitlines()) == {
+        "class-endpoints.txt", "notes/class-endpoints.txt"
+    }
+
+
+@pytest.mark.unit
 def test_no_secret_patterns_in_tracked_files():
     offenders = []
     for rel in _tracked_files():
