@@ -16,6 +16,7 @@ env/
 .env
 .env.*
 !.env.example
+class-endpoints.txt
 
 # =============================================================================
 # Course materials & data (downloaded from Canvas; often large / licensed)
