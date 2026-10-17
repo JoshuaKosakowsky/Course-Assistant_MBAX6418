@@ -60,6 +60,14 @@ def test_client_posts_once_to_configured_chat_endpoint(monkeypatch):
     assert issubclass(model.QuizModelError, ValueError)
 
 
+def test_client_requests_server_enforced_json_object_output():
+    session = FakeSession(FakeResponse({"choices": [{"message": {"content": "{}"}}]}))
+    assert client_with(session).chat([{"role": "user", "content": "Return JSON."}]) == "{}"
+    payload = session.calls[0][1]["json"]
+    assert payload["response_format"] == {"type": "json_object"}
+    assert len(session.calls) == 1
+
+
 def client_with(session=None, **overrides):
     options = dict(base_url="https://quiz.invalid:9001/v1", api_key="synthetic-test-key",
                    model="synthetic-vision", session=session or FakeSession())
@@ -219,7 +227,9 @@ def test_generator_maps_only_server_side_evidence_and_separates_untrusted_data()
 
 
 @pytest.mark.parametrize("output", [
-    "not JSON", "```json\n{}\n```", "null", "[]", "{}", '{"questions": null}',
+    "not JSON", "```json\n{}\n```",
+    "```json\n" + json.dumps({"questions": [question_data()]}) + "\n```",
+    "null", "[]", "{}", '{"questions": null}',
     '{"questions": {}}', '{"questions": []}',
     json.dumps({"questions": [question_data()], "extra": "forbidden"}),
     json.dumps({"questions": [question_data(), question_data(prompt="Second?")]}),
