@@ -25,6 +25,7 @@ from .config import APP_HOST, APP_PORT
 from .documents import DocumentNotFoundError, DocumentStore
 from .embeddings import EmbeddingsError, TextEmbeddingClient
 from .indexing import CorpusIndexer
+from .lookup import lookup_question
 from .ingest import add_and_parse
 from .parse import ConversionError, UnsupportedFormatError
 from .quiz_ui import QuizController
@@ -36,6 +37,35 @@ SUPPORTED_LABEL = (
 )
 
 TABLE_COLUMNS = ["filename", "format", "pages", "size", "added_at"]
+
+# Scope overrides to Lookup so existing Library controls retain their styling.
+LOOKUP_CSS = """
+#lookup-heading h2 {
+    font-family: var(--font-sans, var(--font));
+    font-size: var(--block-label-text-size);
+    font-weight: var(--block-label-text-weight);
+    line-height: 1.4;
+    color: var(--block-label-text-color);
+    margin: 0;
+}
+#lookup-button, #lookup-button button {
+    background: #2563eb;
+    border-color: #2563eb;
+    color: #ffffff;
+}
+#lookup-button:hover, #lookup-button button:hover {
+    background: #1d4ed8;
+    border-color: #1d4ed8;
+}
+#lookup-button:active, #lookup-button button:active {
+    background: #1e40af;
+    border-color: #1e40af;
+}
+#lookup-button:focus-visible, #lookup-button button:focus-visible {
+    outline: 2px solid #2563eb;
+    outline-offset: 3px;
+}
+"""
 
 
 def _file_path(file) -> str | None:
@@ -266,6 +296,36 @@ def build_ui(store: DocumentStore | None = None, indexer=None, quiz_provider=Non
             outputs=[quiz_score, quiz_feedback], api_name=False,
         )
 
+        gr.Markdown("## Lookup", elem_id="lookup-heading")
+        gr.Markdown(
+            "Ask a question to find matching passages in the Library PDFs. "
+            "Results show verbatim excerpts, filenames, and page numbers—not a generated answer."
+        )
+        lookup_input = gr.Textbox(
+            label="Question",
+            placeholder="What would you like to look up in your course PDFs?",
+            lines=1,
+            max_lines=4,
+            max_length=2000,
+        )
+        lookup_button = gr.Button("Look up", variant="primary", elem_id="lookup-button")
+        lookup_results = gr.HTML(
+            value="<p>Enter a question and select Look up, or press Enter.</p>",
+            label="Lookup results",
+        )
+        lookup_button.click(
+            lambda question: lookup_question(store, question, indexer),
+            inputs=[lookup_input],
+            outputs=[lookup_results],
+            api_name="lookup",
+        )
+        lookup_input.submit(
+            lambda question: lookup_question(store, question, indexer),
+            inputs=[lookup_input],
+            outputs=[lookup_results],
+            api_name="lookup_submit",
+        )
+
         add_button.click(
             lambda f, store=store, indexer=indexer: add_file(
                 store, f, indexer
@@ -331,5 +391,5 @@ def _production_indexer() -> tuple[DocumentStore, CorpusIndexer]:
 if __name__ == "__main__":
     store, indexer = _production_indexer()
     build_ui(store, indexer).launch(
-        server_name=APP_HOST, server_port=APP_PORT, inbrowser=False
+        server_name=APP_HOST, server_port=APP_PORT, inbrowser=False, css=LOOKUP_CSS
     )
