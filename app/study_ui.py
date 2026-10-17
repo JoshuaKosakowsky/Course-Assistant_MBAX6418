@@ -80,7 +80,7 @@ class QnaController:
             current = {doc.doc_id for doc in self.store.list()}
             if not set(materials).issubset(current):
                 return "Materials changed while answering. Please ask again.", "", []
-            if not result.grounded:
+            if not result.grounded or not result.sources:
                 return "No supported answer found.", f"<p>{escape(MISSING_INFO_FALLBACK)}</p>", []
             html = ["<h3>Answer</h3>", f"<p>{escape(result.answer).replace(chr(10), '<br>')}</p>"]
             images = []

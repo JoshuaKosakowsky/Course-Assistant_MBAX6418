@@ -17,9 +17,10 @@ SESSION_TTL_SECONDS = 3600
 class QuizController:
     """Keep answer keys on the server, separated by browser session."""
 
-    def __init__(self, provider=None, store=None):
+    def __init__(self, provider=None, store=None, unavailable_message=None):
         self.provider = provider
         self.store = store
+        self.unavailable_message = unavailable_message
         self._sessions = {}
         self._generations = {}
         self._completed_feedback = {}
@@ -57,7 +58,8 @@ class QuizController:
         if not materials:
             return ("Please select at least one course document.", *empty, "", "", [])
         if self.provider is None:
-            return ("Question generation is not connected yet. No quiz was created.", *empty, "", "", [])
+            return (self.unavailable_message or "Question generation is not connected yet. No quiz was created.",
+                    *empty, "", "", [])
         try:
             if isinstance(count, bool) or int(count) != count:
                 raise ValueError("Question count must be a whole number.")

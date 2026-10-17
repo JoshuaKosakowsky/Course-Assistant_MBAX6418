@@ -203,7 +203,9 @@ def build_ui(store: DocumentStore | None = None, indexer=None, quiz_provider=Non
     # Reconcile replaces the in-memory keyword index: bind retrieval AFTER it.
     if connect_services and indexer is not None:
         retrieval, qna, quiz_provider = production_study_services(indexer)
-    quiz_controller = QuizController(quiz_provider, store=store)
+    quiz_controller = QuizController(quiz_provider, store=store, unavailable_message=(
+        "Quiz generation is unavailable. Configure the server-side vision model and restart the app."
+        if connect_services and quiz_provider is None else None))
     qna_controller = QnaController(store, retrieval, qna)
 
     with gr.Blocks(title="Course Assistant") as demo:

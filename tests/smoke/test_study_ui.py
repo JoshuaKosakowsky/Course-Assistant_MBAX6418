@@ -192,3 +192,30 @@ def test_image_only_evidence_reaches_model_and_source_gallery(library):
     assert "checked" in status and model.calls == 2
     assert "Visual evidence" in html and images
     assert images[0][0] == item.image_path
+
+
+def test_removal_during_retrieval_stops_before_model(library):
+    store, indexer, doc = library
+    service = RetrievalService(indexer.keyword, store=store)
+    model = EvidenceModel(doc.filename)
+
+    class RemovingRetrieval:
+        def retrieve(self, *args, **kwargs):
+            result = service.retrieve(*args, **kwargs)
+            store.remove(doc.doc_id)
+            return result
+
+    result = QnaController(store, RemovingRetrieval(), QnaOrchestrator(model)).ask(
+        [doc.doc_id], "retrieval")
+    assert "changed while retrieving" in result[0] and result[1:] == ("", [])
+    assert model.calls == 0
+
+
+def test_grounded_result_without_sources_is_not_displayed(library):
+    store, indexer, doc = library
+    model = SimpleNamespace(answer=lambda *args: SimpleNamespace(
+        grounded=True, sources=(), answer="Unsupported text"))
+    result = QnaController(store, RetrievalService(indexer.keyword, store=store), model).ask(
+        [doc.doc_id], "retrieval")
+    assert "Unsupported text" not in str(result)
+    assert "No supported answer" in result[0]
