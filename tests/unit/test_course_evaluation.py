@@ -96,3 +96,44 @@ def test_document_resolution_fails_closed_on_missing_or_duplicate_filenames():
     store.list = lambda: [SimpleNamespace(filename="a.pdf", doc_id=value) for value in ("a", "b")]
     with pytest.raises(ValueError):
         resolve_documents(store, ["a.pdf"])
+
+
+def test_model_answers_are_serialized_with_sources_but_remain_unreviewed(questions):
+    from app.qna import QnaResult
+    from app.qna_schema import Source
+    source = Source("course.pdf", 2, "An authentic supplied excerpt.")
+
+    class Pack:
+        items = [SimpleNamespace(doc_id="chosen", filename="course.pdf", page_no=2)]
+
+        def to_sources(self):
+            return [source]
+
+    class Service:
+        def retrieve(self, *args, **kwargs):
+            return SimpleNamespace(evidence=Pack(), stages={"rerank": "ok"})
+
+    seen = []
+    class Qna:
+        def answer(self, question, evidence):
+            seen.append((question, evidence))
+            return QnaResult("An answer requiring human review.", (source,), grounded=True)
+
+    rows = evaluate(questions, {"rerank_on": Service(), "rerank_off": Service()}, Qna(), ("chosen",))
+    assert len(seen) == 16
+    assert rows[0]["sources"][0]["document"] == "course.pdf"
+    assert rows[0]["sources"][0]["page"] == 2
+    assert rows[0]["answer"] == "An answer requiring human review."
+    assert rows[0]["correct"] is rows[0]["sources_support_answer"] is None
+    assert not rows[0]["rerank_comparison_valid"]  # off service incorrectly reported reranking
+
+
+def test_foreign_document_evidence_never_reaches_model(questions):
+    class Service:
+        def retrieve(self, *args, **kwargs):
+            return SimpleNamespace(evidence=SimpleNamespace(items=[SimpleNamespace(doc_id="foreign")]))
+    class Never:
+        def answer(self, *args):
+            pytest.fail("foreign evidence must never reach the model")
+    rows = evaluate(questions, {"rerank_on": Service(), "rerank_off": Service()}, Never(), ("chosen",))
+    assert all(row["error"] and not row["sources"] for row in rows)
