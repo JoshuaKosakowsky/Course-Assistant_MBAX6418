@@ -262,6 +262,19 @@ See [the integration verification record](results/study-ui-verification.md).
 
 ## Findings and design decisions
 
+### Required course-answer evaluation
+
+The [eight-question course set](docs/course-evaluation.json) includes syllabus
+questions, slide text, the Week 2 Prod meme, a diagram-label question, and a
+missing-information check. Expected source pages were inspected locally.
+The [evaluation guide](docs/COURSE_EVALUATION.md) provides a deliberate live
+rerank-off/on comparison, answer latency recording, and human correctness,
+source-support and image review. Run `python -m scripts.evaluate_course --live`
+only with configured class services and authorized local course materials.
+Raw answers/excerpts default to gitignored `results/raw/`; publish only a
+reviewed, appropriately sanitized report. This question set and runner are
+prepared; no new live answer results or design recommendation are claimed.
+
 ### Chunk size: fewer records, no measured quality difference
 
 The [chunk-size comparison](results/chunk-size-comparison.md) uses four
