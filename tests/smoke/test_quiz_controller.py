@@ -181,8 +181,11 @@ def test_verified_original_image_is_displayed(tmp_path):
     pages = store.artifacts_dir / doc.doc_id / "pages"
     pages.mkdir(parents=True)
     original = pages / "page-001.png"
-    original.write_bytes(base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ" "AAAADUlEQVQIHWP4z8DwHwAFgAI/ScL/nwAAAABJRU5ErkJggg=="
-    ))
+    from PIL import Image
+    Image.new("RGB", (32, 32), "white").save(original)
+    with Image.open(original) as image:
+        image.load()
+        assert image.size == (32, 32)
 
     manifest = {
         "doc_id": doc.doc_id,
