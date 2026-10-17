@@ -42,6 +42,11 @@ class ChromaLikeBackend:
     exactly what MSpanny's VisualIndex exposes to our app code. Extra
     helpers (drop_vector, fail_next_remove, fail_next_add) exist purely
     for simulating failure/loss in tests.
+
+    Mirrors PR #11's final id scheme: STABLE per-(doc_id, page) SLOT ids
+    (upsert replaces the previous embedding for a changed page), plus
+    ``content_sha256`` in the metadata (the coordinated freshness field
+    Phase 3 verifies) so the offline suite exercises the real protocol.
     """
 
     def __init__(self):
@@ -51,6 +56,7 @@ class ChromaLikeBackend:
         self.embed_calls = 0
         self.fail_remove = False
         self.add_fail_on_n: int | None = None   # fail add after N successes
+        self._collection = _ShimCollection(self)
 
     # -- public API (mirrors VisualIndex) --------------------------------
 
@@ -58,14 +64,13 @@ class ChromaLikeBackend:
         if self.add_fail_on_n is not None:
             if self.embed_calls > self.add_fail_on_n:
                 raise RuntimeError("simulated embed failure")
-        # content-addressed id, exactly like MSpanny's _image_id():
-        # {doc_id}:{page}:{sha256(full file bytes)[:10]} — embeds the page
-        # identity, so twin images on different pages NEVER share an id
-        digest = ChromaLikeBackend._sha(Path(image_path))
-        vid = f"{doc_id}:{page}:{digest[:10]}"
+        # stable slot id {doc_id}:{page} — upsert semantics: re-indexing a
+        # changed page REPLACES its vector; identical content is a no-op
+        vid = f"{doc_id}:{int(page)}"
         self.vectors[vid] = {
             "doc_id": doc_id, "page": int(page), "image_path": str(image_path),
             "vec": list(embedding or []),
+            "content_sha256": ChromaLikeBackend._sha(Path(image_path)),
         }
         self.added.append((doc_id, int(page), str(image_path)))
         return vid
@@ -84,6 +89,9 @@ class ChromaLikeBackend:
     def get_ids(self):
         """Read-only local id enumeration (identity integrity check)."""
         return set(self.vectors)
+
+    def _editable_metadata(self):  # mirrors collection.get() for probes
+        return self.vectors
 
     def query_embedding(self, embedding, k=5):
         scored = sorted(
@@ -136,6 +144,23 @@ def _cosine_dist(a, b):
 # --------------------------------------------------------------------------
 # fixtures
 # --------------------------------------------------------------------------
+
+class _ShimCollection:
+    """ChromaDB-Collection-shaped read-only view over the stub's vectors
+    (ids + metadatas), mirroring PR #11's private ``_collection`` so the
+    production enumeration probe exercises the REAL protocol shape."""
+
+    def __init__(self, owner):
+        self._owner = owner
+
+    def get(self, limit=None, offset=0, include=None):
+        items = list(self._owner.vectors.items())
+        page = items[(offset or 0):(offset or 0) + (limit or len(items))]
+        return {
+            "ids": [k for k, _ in page],
+            "metadatas": [dict(v) for _, v in page],
+        }
+
 
 def make_pdf(path: Path, pages: int = 2) -> Path:
     d = pymupdf.open()
@@ -222,10 +247,12 @@ def test_repair_reports_backend_without_inspection_interface(tmp_path):
         count = None
         query_embedding = None
         get_ids = None
+        _collection = None
 
     indexer.visual.backend = OpaqueBackend()
     indexer.visual.backend.vectors = backend.vectors
     indexer.visual.backend.embed_calls = backend.embed_calls
+    indexer.visual.backend._collection = None  # __init__ built a shim; hide it
     stats = indexer.reconcile()
     assert any("integrity check unavailable" in f for f in stats.visual_failed)
 
@@ -418,9 +445,10 @@ def test_identical_pages_restored_by_identity_not_distance(tmp_path):
     # both page images are byte-identical twins
     img1, img2 = (Path(pg["image_path"]) for pg in pages)
     assert img1.read_bytes() == img2.read_bytes()
-    # ...yet their record ids embed the page number and differ
-    vid1 = f"{rec.doc_id}:1:{ChromaLikeBackend._sha(img1)[:10]}"
-    vid2 = f"{rec.doc_id}:2:{ChromaLikeBackend._sha(img2)[:10]}"
+    # ...yet their record ids are STABLE slots that embed the page number
+    # (PR #11's final scheme) and therefore differ
+    vid1 = f"{rec.doc_id}:1"
+    vid2 = f"{rec.doc_id}:2"
     assert vid1 != vid2
     assert vid1 in backend.vectors and vid2 in backend.vectors
 
@@ -450,12 +478,17 @@ def _page_images(store, doc_id):
 
 
 def test_changed_page_replaces_stale_vector(tmp_path):
+    """PR #11's final scheme: re-indexing a changed page upserts the SAME
+    stable slot id ({doc_id}:{page}) — the stale embedding is replaced in
+    place, never co-existing, and never leaves an old id behind."""
     store, rec, indexer, backend = build_env(tmp_path)
     indexer.index_document(rec.doc_id)
     ids1 = {v: e["page"] for v, e in backend.vectors.items()}
     assert len(ids1) == 2 and set(ids1.values()) == {1, 2}
-    page1_old = next(v for v, pg in ids1.items() if pg == 1)
-    page2 = next(v for v, pg in ids1.items() if pg == 2)
+    slot1 = f"{rec.doc_id}:1"
+    slot2 = f"{rec.doc_id}:2"
+    assert slot1 in ids1 and slot2 in ids1            # stable slot ids
+    vec1_before = backend.vectors[slot1]["vec"]
 
     # mutate ONLY page 1's image bytes (new visual content, same path)
     img1 = _page_images(store, rec.doc_id)[1]
@@ -466,11 +499,10 @@ def test_changed_page_replaces_stale_vector(tmp_path):
 
     stats = indexer.index_document(rec.doc_id)
     assert stats.visual_pages == 2
-    ids2 = {v: e["page"] for v, e in backend.vectors.items()}
-    assert len(ids2) == 2, "old page-1 vector must NOT survive the change"
-    new_p1 = next(v for v, pg in ids2.items() if pg == 1)
-    assert new_p1 != page1_old                    # stale id replaced
-    assert page2 in ids2                          # unaffected page same id
+    ids2 = set(backend.vectors)
+    assert len(ids2) == 2
+    assert slot1 in ids2 and slot2 in ids2   # SAME ids — content replaced
+    assert backend.vectors[slot1]["vec"] != vec1_before  # stale embedding gone
     assert len(indexer.visual.state.get(rec.doc_id)) == 2
 
 
@@ -651,7 +683,8 @@ def test_no_enumeration_backend_reports_limitation_not_silence(tmp_path):
     never a silent claim that integrity is assured."""
     store, rec, indexer, backend = build_env(tmp_path)
     indexer.index_document(rec.doc_id)
-    backend.get_ids = None                # shadow the enumeration probe
+    backend.get_ids = None                # shadow the enumeration probes
+    backend._collection = None            # (and the collection-shaped one)
     stats = indexer.reconcile()
     assert any("enumeration" in f and "limitation" in f
                for f in stats.visual_failed)
@@ -701,7 +734,9 @@ def test_partial_readd_failure_drops_entry_then_retry_recovers(tmp_path):
     indexer.index_document(rec.doc_id)
     ids1 = {v: e["page"] for v, e in backend.vectors.items()}
     assert len(ids1) == 2
-    page1_old = next(v for v, pg in ids1.items() if pg == 1)
+    slot1 = f"{rec.doc_id}:1"
+    assert slot1 in ids1
+    vec1_before = backend.vectors[slot1]["vec"]
 
     # mutate ONLY page 1 -> doc-level replacement; page 1's re-add fails
     img1 = _page_images(store, rec.doc_id)[1]
@@ -716,16 +751,15 @@ def test_partial_readd_failure_drops_entry_then_retry_recovers(tmp_path):
     # eviction happened; page 2 re-added; page 1's OLD entry is gone
     state = indexer.visual.state.get(rec.doc_id)
     assert "1" not in state and len(state) == 1
-    pages_now = {v: e["page"] for v, e in backend.vectors.items()}
-    assert len(pages_now) == 1 and page1_old not in pages_now
+    assert slot1 not in backend.vectors            # page 1 evicted, not back
 
     # RETRY: page 1's image stat has NOT changed; the dropped entry must
     # make this an additive re-index, not a silent skip
     stats2 = indexer.index_document(rec.doc_id)
     assert not stats2.visual_failed
-    pages_final = {v: e["page"] for v, e in backend.vectors.items()}
-    assert len(pages_final) == 2
-    assert page1_old not in pages_final          # stale id never returns
+    assert slot1 in backend.vectors                # SAME slot restored
+    assert backend.vectors[slot1]["vec"] != vec1_before  # fresh content
+    assert len(backend.vectors) == 2
     assert len(indexer.visual.state.get(rec.doc_id)) == 2
 
 
@@ -1104,3 +1138,41 @@ def test_manifest_valid_page_records_validate(tmp_path):
     assert not stats.visual_failed
     assert set(backend.vectors) == ids1
     assert len(indexer.visual.state.get(rec.doc_id)) == 2
+
+
+# --------------------------------------------------------------------------
+# ROUND 6 (MSpanny's PR #15 review): content-freshness INDEPENDENT of slot
+# identity — content_sha256 metadata vs the tracked digest catches a stale
+# vector even when its slot id and file stat say nothing changed
+# --------------------------------------------------------------------------
+
+def test_metadata_content_hash_detects_stale_vector(tmp_path):
+    """REGRESSION (PR #11 slot-id scheme): the slot id only identifies
+    WHICH (doc, page) a vector belongs to — freshness is verified against
+    the content_sha256 metadata recorded at embed time. A stored vector
+    whose metadata digest diverges from the tracked digest is re-embedded
+    atomically (slot upsert) on ordinary reconcile."""
+    store, rec, indexer, backend = build_env(tmp_path)
+    indexer.index_document(rec.doc_id)
+    slot1 = f"{rec.doc_id}:1"
+    embeds_before = backend.embed_calls
+
+    # force the ChromaDB-collection-shaped enumeration probe (the one the
+    # production path uses against PR #11's real _collection)
+    backend.get_ids = None
+    # the vector's metadata claims content that state does NOT record
+    backend.vectors[slot1]["content_sha256"] = "deadbeef" * 8
+    assert backend.vectors[slot1]["content_sha256"] != \
+        indexer.visual.state.get(rec.doc_id)["1"]["d"]
+
+    stats = indexer.reconcile()
+    assert stats.visual_repaired == 1            # stale content re-embedded
+    assert len(backend.vectors) == 2             # slot upsert, no duplicates
+    assert backend.vectors[slot1]["content_sha256"] == \
+        indexer.visual.state.get(rec.doc_id)["1"]["d"]   # metadata converges
+    # only the stale slot was embedded (page 2 untouched)
+    assert backend.embed_calls - embeds_before == 1
+
+    # idempotent: a second reconcile does nothing
+    stats2 = indexer.reconcile()
+    assert stats2.visual_repaired == 0

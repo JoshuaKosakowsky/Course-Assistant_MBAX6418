@@ -7,7 +7,7 @@ injectable so offline tests never need the unmerged branch.
 
 Responsibilities split (team plan):
 - Issue #3 (PR #11): ``VisualIndex`` storage, ``ClassEmbeddingClient``,
-  content-addressed ids, ``remove_doc()``.
+  stable per-(doc_id, page) slot ids, ``remove_doc()``.
 - Issue #4 (this module): optional discovery, 512px embed-copy resizing,
   page-level state tracking (avoids re-embedding on restart), upload-time
   indexing, incremental backfill, deletion purging, retrieval wiring.
@@ -290,14 +290,14 @@ class VisualIndexer:
         """Index every manifest page image for one document.
 
         - UNCHANGED page (state matches the file stat) -> skipped, zero calls.
-        - NEW page -> embedded and added (unique content-addressed id).
-        - CHANGED page (a tracked page whose image bytes changed) -> the
-          old content-addressed vector must NOT survive alongside the new
-          one. PR #11 exposes no per-page removal, so this becomes a
-          controlled DOCUMENT-LEVEL replacement (``replace_document``):
-          all replacement embeddings are preflighted first, and only then
-          is the document evicted and re-added. Any preflight failure
-          aborts with the old vectors and state untouched.
+        - NEW page -> embedded and upserted under its stable (doc_id, page)
+          slot id.
+        - CHANGED page (a tracked page whose image file changed) -> the
+          document-level replacement (``replace_document``): all
+          replacement embeddings are preflighted first, only then is the
+          document evicted and re-added, so pages removed from the
+          manifest cannot linger and any preflight failure aborts with
+          the old vectors and state untouched.
         """
         stats = IndexStats(doc_ids=1)
         try:
@@ -438,8 +438,8 @@ class VisualIndexer:
         stats.visual_added = added
         if added == len(ready):
             # full success: never retry again; a stale pending-removal
-            # marker is moot (ids are content-addressed, so the vectors
-            # just written ARE this document's content)
+            # marker is moot (slot-uspsert ids are per (doc, page), so the
+            # vectors just written ARE this document's content)
             self.state.clear_replacement_failed(doc_id)
             self.state.drop_pending(doc_id)
         elif added == 0:
@@ -490,13 +490,19 @@ class VisualIndexer:
            was down stays queued until it succeeds, across restarts.
         1. Prune orphan state (deleted docs that predate the feature).
         2. INTEGRITY: a tracking entry is NOT proof the vector still
-           exists. Every reconcile verifies membership by expected IDENTITY:
-           the expected content-addressed ids are recomputed from state
-           ({doc}:{page}:{digest[:10]}) and compared against a read-only,
-           LOCAL enumeration of the backend's current ids — no embedding
-           calls are needed for detection, and an unrelated/foreign vector
-           can NEVER mask a missing tracked page (equal counts are never
-           trusted). Missing pages are re-added by the same identity.
+           exists. Every reconcile verifies membership by expected SLOT
+           ids ({doc}:{page} — PR #11's stable identity, independent of
+           content) against a read-only, LOCAL enumeration of the
+           backend's current ids — no embedding calls are needed for
+           detection, and an unrelated/foreign vector can NEVER mask a
+           missing tracked page (equal counts are never trusted).
+           Missing pages are re-added by the same slot identity.
+           CONTENT freshness is verified independently of identity: when
+           the backend records ``content_sha256`` in the vector metadata
+           (coordinated PR #11 change), the expected digest from state
+           is compared against it and stale pages are re-embedded;
+           without that metadata the stat-based incremental pass remains
+           the freshness fallback (documented limitation).
            Backends without any enumeration capability get an explicit
            limitation report instead of a pretended guarantee; for those,
            a count mismatch (either direction) still triggers the
@@ -514,9 +520,9 @@ class VisualIndexer:
         # 0. retry failed deletions (durable across restarts)
         for doc_id in self.state.pending_doc_ids():
             if doc_id in known:
-                # the document is BACK in the library: because vector ids
-                # are content-addressed, its current vectors ARE the
-                # re-added content — the pending removal is stale and
+                # the document is BACK in the library: slot ids are per
+                # (doc_id, page), so its current vectors ARE the re-added
+                # content — the pending removal is stale and
                 # must never purge freshly indexed vectors
                 self.state.drop_pending(doc_id)
                 continue
@@ -545,22 +551,28 @@ class VisualIndexer:
                 # embedding and id (for backends without enumeration)
                 stats += self.repair_missing_vectors()
             else:
-                actual_ids = self._enumerate_backend_ids()
-                if actual_ids is not None:
-                    # read-only local membership check: the expected
-                    # content-addressed ids recomputed from state must all
-                    # be present. Equal counts are never treated as proof;
-                    # unrelated/foreign ids are never deleted.
-                    missing = self._expected_ids() - actual_ids
+                entries = self._enumerate_backend_entries()
+                if entries is not None:
+                    # read-only local membership check: the expected slot
+                    # ids recomputed from state must all be present. Equal
+                    # counts are never treated as proof; unrelated/foreign
+                    # ids are never deleted. Content-freshness is checked
+                    # independently via content_sha256 metadata when the
+                    # backend records it (slot upserts then atomically
+                    # replace stale vectors).
+                    expected = self._expected_ids()
+                    missing = expected - set(entries)
                     if missing:
                         stats += self._repair_ids(missing)
-                    if self.state.corrupted and actual_ids:
+                    stale = self._stale_slots_by_metadata(expected, entries)
+                    if stale:
+                        stats += self._repair_ids(stale)
+                    if self.state.corrupted and entries:
                         stats.visual_failed.append(
                             "visual state file was unreadable but the "
                             "backend still has entries — run 'python -m "
                             "app.indexing --visual-backfill' to rebuild "
-                            "state safely (content-addressed ids prevent "
-                            "duplicates)"
+                            "state safely (slot upserts prevent duplicates)"
                         )
                 else:
                     has_count = callable(getattr(self.backend, "count", None))
@@ -593,7 +605,7 @@ class VisualIndexer:
                                 "visual state file was unreadable but the "
                                 "backend still has entries — run 'python -m "
                                 "app.indexing --visual-backfill' to rebuild "
-                                "state safely (content-addressed ids prevent "
+                                "state safely (slot upserts prevent "
                                 "duplicates)"
                             )
                         else:
@@ -657,28 +669,28 @@ class VisualIndexer:
         """Verify state-recorded pages against the backend and re-add the
         ones whose vectors are genuinely gone.
 
-        Triggered ONLY when the backend's total entry count is below the
-        state's expected total (a cheap aggregate gate that keeps normal
-        restarts at zero embeddings).
+        Triggered when the backend's total entry count mismatches the
+        state's expected total (the enumeration-less fallback), or by the
+        explicit ``verify_ids=True`` audit.
 
         IDENTITY, not distance: two pages can share a near-identical
         image, so a low nearest-neighbour distance does NOT prove the
         specific (doc, page) record exists. MSpanny's VisualIndex returns
-        a content-addressed ``VisualHit.id`` of the form
-        ``{doc_id}:{page}:{sha256(image_bytes)[:10]}`` — exactly the
-        digest our state records — so the expected id is recomputed from
-        state and a page is 'present' ONLY when a returned hit carries
-        that exact id. A deleted record's id can never be matched by a
-        surviving twin page (the id embeds the page number), so the twin
-        is never mistaken for proof, and re-adding the lost record never
+        a stable slot ``VisualHit.id`` of the form ``{doc_id}:{page}``
+        (independent of content) — exactly what our state records per
+        page — so the expected slot id is recomputed from state and a
+        page is 'present' ONLY when a returned hit carries that exact id.
+        A deleted slot id can never be matched by a surviving twin page
+        (the slot embeds the page number), so the twin is never mistaken
+        for proof, and re-adding the lost record (a slot upsert) never
         damages the survivor.
 
         If the backend returns hits without an ``id`` attribute the
         record cannot be verified by identity; the SAFEST recovery is
-        then a re-add (idempotent content-addressed upsert — restores a
-        missing record and leaves a present one byte-identical), which is
-        what happens. Documented limitation: identical-content pages are
-        only distinguishable by their ids.
+        then a re-add (idempotent slot upsert — restores a missing
+        record and leaves a present one untouched), which is what
+        happens. Documented limitation: identical-content pages are only
+        distinguishable by their slot ids.
 
         Pages whose file changed (stat mismatch) are left to the normal
         incremental pass, and verify failures are reported, never guessed.
@@ -710,8 +722,7 @@ class VisualIndexer:
                         f"{doc.doc_id} p{page_no}: integrity verify failed: {exc}"
                     )
                     continue
-                digest = str(entry.get("d", "") or "")
-                expected_id = f"{doc.doc_id}:{page_no}:{digest[:10]}"
+                expected_id = f"{doc.doc_id}:{page_no}"
                 ids = [getattr(h, "id", None) for h in hits]
                 present = expected_id in ids
                 if present:
@@ -734,43 +745,51 @@ class VisualIndexer:
         self.state.save()
         return stats
 
-    # -- identity helpers (finding 5: equal counts never prove integrity) --
+    # -- identity helpers (finding 5: equal counts never prove integrity;
+    #    PR #11 uses stable per-(doc_id, page) SLOT ids, content-exactness
+    #    is tracked separately and verified via content_sha256 metadata) --
 
     def _expected_ids(self) -> set:
-        """Content-addressed ids the state claims are indexed, recomputed
-        offline: {doc_id}:{page}:{sha256(image bytes)[:10]} — exactly the
-        format the PR #11 backend derives at add time (VisualHit.id)."""
+        """Stable slot ids the state claims are indexed, recomputed
+        offline: {doc_id}:{page_no} — exactly PR #11's _slot_id format.
+
+        The slot is the DOCUMENT identity, deliberately independent of
+        content: content-freshness is verified separately (state digest
+        vs. the vector's content_sha256 metadata, or the stat-based
+        incremental pass when that metadata is absent)."""
         expected = set()
         for doc_id in self.state.doc_ids():
-            for page_no, entry in self.state.get(doc_id).items():
-                digest = str(entry.get("d", "") or "")
-                if digest:
-                    expected.add(f"{doc_id}:{page_no}:{digest[:10]}")
+            for page_no in self.state.get(doc_id):
+                expected.add(f"{doc_id}:{page_no}")
         return expected
 
-    def _enumerate_backend_ids(self) -> Optional[set]:
-        """Read-only LOCAL enumeration of the backend's current ids.
+    def _enumerate_backend_entries(self) -> Optional[Dict[str, dict]]:
+        """Read-only LOCAL enumeration of the backend's current ids with
+        their metadata: ``{id: metadata_dict}`` (empty dict when the
+        backend offers ids without metadata).
 
         Preference order: an explicit ids capability (``get_ids()`` /
         ``list_ids()`` / ``ids``), then a ChromaDB-collection-shaped
         attribute (public ``collection`` or the private ``_collection`` of
         the PR #11 class) via read-only ``Collection.get(limit=..., ...)``
-        pagination. Never mutates and never calls the embedding service.
-        Returns None when NO capability exists — callers must then report
-        the limitation instead of trusting counts.
+        pagination (``include=["metadatas"]``). Never mutates and never
+        calls the embedding service. Returns None when NO capability
+        exists — callers must then report the limitation instead of
+        trusting counts.
         """
         backend = self.backend
         for name in ("get_ids", "list_ids"):
             fn = getattr(backend, name, None)
             if callable(fn):
                 try:
-                    return set(str(i) for i in fn())
+                    return {str(i): {} for i in fn()}
                 except Exception:
                     return None
         raw = getattr(backend, "ids", None)
         if raw is not None:
             try:
-                return set(str(i) for i in (raw() if callable(raw) else raw))
+                items = raw() if callable(raw) else raw
+                return {str(i): {} for i in items}
             except Exception:
                 return None
         for name in ("collection", "_collection"):
@@ -778,33 +797,64 @@ class VisualIndexer:
             g = getattr(coll, "get", None)
             if coll is not None and callable(g):
                 try:
-                    ids: list = []
+                    entries: Dict[str, dict] = {}
                     offset = 0
                     step = 512
                     while True:
-                        page = g(limit=step, offset=offset)
+                        page = g(limit=step, offset=offset,
+                                 include=["metadatas"])
                         pids = page.get("ids") or []
-                        ids.extend(str(i) for i in pids)
+                        metas = page.get("metadatas") or []
+                        for vid, meta in zip(pids, metas):
+                            entries[str(vid)] = dict(meta or {})
                         if len(pids) < step:
                             break
                         offset += len(pids)
-                    return set(ids)
+                    return entries
                 except Exception:
                     return None
         return None
 
+    def _enumerate_backend_ids(self) -> Optional[set]:
+        """Back-compat wrapper: just the enumerated id set."""
+        entries = self._enumerate_backend_entries()
+        return None if entries is None else set(entries)
+
+    def _stale_slots_by_metadata(self, expected: set,
+                                 entries: Dict[str, dict]) -> set:
+        """Slots whose stored vector's ``content_sha256`` metadata (when
+        present) does NOT match the digest state recorded at index time.
+
+        This is the content-freshness check for the slot-id scheme: the
+        id only says *which* (doc, page) the vector belongs to; whether
+        it still matches the CURRENT image bytes is answered by the
+        digest, exactly as proposed in the PR #11 review. Slots whose
+        backend metadata lacks ``content_sha256`` are NOT judged here —
+        the stat-based incremental pass remains that fallback."""
+        stale = set()
+        for slot in expected:
+            meta = entries.get(slot) or {}
+            sha = meta.get("content_sha256")
+            if not sha:
+                continue  # metadata unavailable: stat-based pass handles it
+            doc_id, page_no = slot.rsplit(":", 1)
+            digest = str(self.state.get(doc_id).get(page_no, {})
+                         .get("d", "") or "")
+            if digest and sha != digest:
+                stale.add(slot)
+        return stale
+
     def _repair_ids(self, missing: set) -> IndexStats:
-        """Re-add pages whose expected content-addressed id is absent from
-        the enumerated backend ids (identity-based, no distance heuristics).
+        """Re-add pages whose expected slot id is absent from the
+        enumerated backend entries, or whose stored content is stale
+        (metadata content_sha256 mismatch) — identity-based, no distance
+        heuristics; a slot upsert atomically replaces any stale vector.
         Pages no longer present in the manifest are left to the normal
         incremental pass (they will be purged/replaced there), never
         reported as repair failures."""
         stats = IndexStats()
         for vid in sorted(missing):
-            parts = vid.split(":")
-            if len(parts) != 3:
-                continue
-            doc_id, page_no, _ = parts[0], parts[1], parts[2]
+            doc_id, page_no = vid.rsplit(":", 1)
             try:
                 page_no = int(page_no)
             except ValueError:

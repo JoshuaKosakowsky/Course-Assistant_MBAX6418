@@ -9,6 +9,7 @@ never touch the network here (no real keys, no real services).
 from __future__ import annotations
 
 import json
+import hashlib
 import io
 import pymupdf
 import pytest
@@ -61,13 +62,13 @@ class FakeVisualBackend:
     def add_image(self, doc_id, page, image_path, embedding=None):
         if self.fail_add:
             raise RuntimeError("embedding service down")
-        # content-addressed id, exactly like MSpanny's _image_id():
-        # {doc_id}:{page}:{sha256(full file bytes)[:10]}
-        import hashlib
-        digest = hashlib.sha256(Path(image_path).read_bytes()).hexdigest()
-        vid = f"{doc_id}:{page}:{digest[:10]}"
+        # stable slot id {doc_id}:{page} (PR #11's final scheme — upsert
+        # replaces the previous embedding for a changed page)
+        vid = f"{doc_id}:{int(page)}"
         self.entries[vid] = {
             "doc_id": doc_id, "page": int(page), "image_path": str(image_path),
+            "content_sha256": hashlib.sha256(
+                Path(image_path).read_bytes()).hexdigest(),
         }
         self.added.append((doc_id, int(page), str(image_path)))
         return vid
