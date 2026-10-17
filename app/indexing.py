@@ -60,8 +60,13 @@ class IndexStats:
     chunks: int = 0
     keyword_chunks: int = 0
     vector_chunks: int = 0
+    visual_pages: int = 0   # page images embedded into the visual index
+    visual_added: int = 0   # == visual_pages today (kept for clarity/summing)
+    visual_repaired: int = 0  # vectors restored after detected loss (integrity)
     skipped: List[str] = field(default_factory=list)      # e.g. vector service down
     errors: List[str] = field(default_factory=list)       # e.g. unparseable document
+    visual_skipped: List[str] = field(default_factory=list)  # already-indexed pages
+    visual_failed: List[str] = field(default_factory=list)   # embed errors (honest)
 
     def summary(self) -> Dict[str, object]:
         return {
@@ -70,8 +75,12 @@ class IndexStats:
             "chunks": self.chunks,
             "keyword_chunks": self.keyword_chunks,
             "vector_chunks": self.vector_chunks,
+            "visual_pages": self.visual_pages,
+            "visual_repaired": self.visual_repaired,
             "skipped": self.skipped,
             "errors": self.errors,
+            "visual_skipped": self.visual_skipped,
+            "visual_failed": self.visual_failed,
         }
 
     def __add__(self, other: "IndexStats") -> "IndexStats":
@@ -81,8 +90,13 @@ class IndexStats:
             chunks=self.chunks + other.chunks,
             keyword_chunks=self.keyword_chunks + other.keyword_chunks,
             vector_chunks=self.vector_chunks + other.vector_chunks,
+            visual_pages=self.visual_pages + other.visual_pages,
+            visual_added=self.visual_added + other.visual_added,
+            visual_repaired=self.visual_repaired + other.visual_repaired,
             skipped=self.skipped + other.skipped,
             errors=self.errors + other.errors,
+            visual_skipped=self.visual_skipped + other.visual_skipped,
+            visual_failed=self.visual_failed + other.visual_failed,
         )
 
     def __iadd__(self, other: "IndexStats") -> "IndexStats":
@@ -92,7 +106,12 @@ class IndexStats:
 
 
 class CorpusIndexer:
-    """Builds and maintains BM25 + ChromaDB text indexes for a library."""
+    """Builds and maintains BM25 + ChromaDB text indexes for a library.
+
+    ``visual`` is an OPTIONAL app.visual.VisualIndexer (None = text-only).
+    It is duck-typed and lazy: indexing.py never imports app.visual at
+    module load, so the application works before PR #11 merges.
+    """
 
     def __init__(
         self,
@@ -101,6 +120,7 @@ class CorpusIndexer:
         chunk_size: int = DEFAULT_CHUNK_SIZE,
         chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
         persist_dir: Optional[Path | str] = None,
+        visual=None,
     ) -> None:
         self.store = store
         self.embedder = embedder  # any object exposing embed(list[str]); None = keyword-only
@@ -111,6 +131,7 @@ class CorpusIndexer:
             self.embedder,
             persist_dir=persist_dir if persist_dir is not None else DEFAULT_PERSIST_DIR,
         )
+        self.visual = visual  # VisualIndexer | None; text-only mode when None
         self._wired = False
 
     # ---- lifecycle ----------------------------------------------------
@@ -118,16 +139,19 @@ class CorpusIndexer:
     def register_hooks(self) -> None:
         """Subscribe to the store's removal hook (existing mechanism).
 
-        This is what makes document deletion purge BOTH indexes in the
-        real application flow. No add-hook: indexing after a successful
-        upload+parse is driven explicitly by the caller (UI or CLI).
+        This is what makes document deletion purge the text indexes AND
+        the visual index in the real application flow. No add-hook:
+        indexing after a successful upload+parse is driven explicitly by
+        the caller (UI or CLI). Idempotent: registering twice never adds
+        a duplicate hook.
         """
         if self._wired:
             return
         self.store.register_removal_hook(self.remove_document)
         self._wired = True
 
-    def reconcile(self) -> IndexStats:
+    def reconcile(self, visual_backfill: bool = False,
+                  **visual_kwargs) -> IndexStats:
         """Startup reconciliation (offline-safe apart from missing-vector
         repair, which needs the embedder):
 
@@ -138,6 +162,12 @@ class CorpusIndexer:
            the embedding service was down during a previous session).
            Only missing documents are embedded — existing vectors are
            preserved and never re-embedded just because the app restarted.
+        4. Visual index (when configured): page-level incremental
+           reconcile — unchanged pages are skipped with zero embedding
+           calls; only missing/changed pages are embedded. Pass
+           ``visual_backfill=True`` to force re-embedding of everything
+           (the explicit ``python -m app.indexing --visual-backfill``
+           command).
         """
         stats = IndexStats()
         self.keyword = KeywordIndex()
@@ -160,20 +190,37 @@ class CorpusIndexer:
                     except Exception as exc:  # pragma: no cover - defensive
                         stats.skipped.append(f"vector:{doc.doc_id}: {exc}")
         stats.vector_chunks = self.vector.count
+        # visual index: incremental by default, forced backfill on request;
+        # extra kwargs (e.g. verify_ids=True identity audit) pass through
+        if self.visual is not None:
+            try:
+                stats += self.visual.reconcile(force=visual_backfill,
+                                               **visual_kwargs)
+            except Exception as exc:  # pragma: no cover - never block startup
+                stats.visual_failed.append(f"reconcile: {exc}")
         return stats
 
     # ---- per-document indexing ----------------------------------------
 
     def index_document(self, doc_id: str) -> IndexStats:
-        """Index (or reindex) one document in both indexes when the
-        embedder is available; keyword-only otherwise. Idempotent."""
+        """Index (or reindex) one document: BM25 + text vectors when the
+        embedder is available (keyword-only otherwise), PLUS visual page
+        images when a visual indexer is configured. Idempotent; failures
+        in one index never mask success in the others, and nothing is
+        claimed as indexed unless it actually was."""
         stats = IndexStats()
         try:
             doc = self.store.get(doc_id)
         except Exception as exc:  # DocumentNotFoundError
             stats.errors.append(f"{doc_id}: {exc}")
             return stats
-        return self._index_one(doc, to_keyword=True, to_vector=True)
+        stats += self._index_one(doc, to_keyword=True, to_vector=True)
+        if self.visual is not None:
+            try:
+                stats += self.visual.index_document(doc_id)
+            except Exception as exc:  # pragma: no cover - defensive
+                stats.visual_failed.append(f"{doc_id}: {exc}")
+        return stats
 
     def _index_one(
         self, doc: Document, to_keyword: bool, to_vector: bool
@@ -224,12 +271,17 @@ class CorpusIndexer:
         return total
 
     def remove_document(self, doc_id: str) -> None:
-        """Removal-hook target: purge the document from BOTH indexes.
+        """Removal-hook target: purge the document from ALL indexes.
 
-        ChromaDB deletes are purely local — this works even when the
-        embedding service is unavailable."""
+        ChromaDB/visual deletes are purely local — this works even when
+        the embedding service is unavailable. A visual-index failure is
+        reported (and the visual state dropped) but never blocks the text
+        purge.
+        """
         self.keyword.remove_document(doc_id)
         self.vector.remove_document(doc_id)
+        if self.visual is not None:
+            self.visual.remove_document(doc_id)
 
     # ---- queries ------------------------------------------------------
 
@@ -248,6 +300,8 @@ class CorpusIndexer:
             "keyword_chunks": self.keyword.size,
             "vector_chunks": self.vector.count,
             "collection": self.vector.collection_name,
+            "visual": "enabled" if self.visual is not None else "unavailable",
+            "visual_pages": self.visual.count() if self.visual is not None else 0,
         }
 
     # ---- helpers ------------------------------------------------------
@@ -283,18 +337,25 @@ def _stats_line(stats: IndexStats) -> str:
         extras.append(f"skipped({len(s['skipped'])})")
     if s["errors"]:
         extras.append(f"errors({len(s['errors'])})")
+    if s["visual_skipped"]:
+        extras.append(f"visual_skipped({len(s['visual_skipped'])})")
+    if s["visual_failed"]:
+        extras.append(f"visual_failed({len(s['visual_failed'])})")
     tail = f" [{', '.join(extras)}]" if extras else ""
-    return (
+    base = (
         f"docs={s['docs']} pages={s['pages']} chunks={s['chunks']} "
-        f"keyword_chunks={s['keyword_chunks']} vector_chunks={s['vector_chunks']}{tail}"
+        f"keyword_chunks={s['keyword_chunks']} vector_chunks={s['vector_chunks']}"
     )
+    visual = f" visual_pages={s['visual_pages']}" if s["visual_pages"] else ""
+    return base + visual + tail
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m app.indexing",
         description=(
-            "Index the document library into BM25 + ChromaDB text indexes. "
+            "Index the document library into BM25 + ChromaDB text indexes, "
+            "and (when configured) page images into the visual index. "
             "Reuses existing parse artifacts; parses only documents without "
             "a manifest. Semantic (vector) indexing needs CLASS_API_KEY in "
             ".env; without it the run is keyword-only and says so."
@@ -304,6 +365,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         help="clear both indexes before indexing")
     parser.add_argument("--keyword-only", action="store_true",
                         help="skip semantic (vector) indexing")
+    parser.add_argument(
+        "--visual-backfill", action="store_true",
+        help="(re)index ALL page images into the visual index, ignoring "
+             "the incremental state (explicit command; startup never does "
+             "a full visual reindex automatically)",
+    )
+    parser.add_argument(
+        "--doc", default=None,
+        help="index only this document id (text + visual)",
+    )
     args = parser.parse_args(argv)
 
     store = DocumentStore()
@@ -322,8 +393,44 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.reindex:
         indexer.vector.clear()
         indexer.keyword = KeywordIndex()
-    stats = indexer.index_library()
-    stats.vector_chunks = indexer.vector.count
+
+    # optional visual indexing (is a no-op with a clear reason pre-merge);
+    # `reason` is initialized so --keyword-only never sees an unbound name
+    reason = "not attempted"
+    if not args.keyword_only:
+        from app.visual import production_visual_indexer
+
+        visual, reason = production_visual_indexer(store)
+        if visual is None:
+            print(f"Visual index DISABLED: {reason}")
+        else:
+            indexer.visual = visual
+            print(f"Visual index enabled (state: {visual.state.path})")
+
+    if args.doc:
+        stats = indexer.index_document(args.doc)
+    else:
+        stats = indexer.index_library()
+        stats.vector_chunks = indexer.vector.count
+
+    # explicit visual backfill: an explicit request must never report
+    # overall success when the visual index cannot do the work
+    if args.visual_backfill:
+        if indexer.visual is None:
+            print(
+                f"ERROR: --visual-backfill requested, but the visual "
+                f"index is unavailable ({reason}); text indexing above is "
+                f"complete, the backfill was NOT performed.",
+                file=sys.stderr,
+            )
+            return 1
+        if args.doc:
+            # SCOPED backfill: re-place ONLY the selected document, never
+            # the whole library (review finding 8)
+            stats += indexer.visual.replace_document(args.doc)
+        else:
+            stats += indexer.visual.reconcile(force=True)
+
     print(f"Indexed library: {_stats_line(stats)}")
     print(f"Status: {indexer.status()}")
     if stats.errors:
@@ -334,7 +441,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("Skipped (embedding service):")
         for s in stats.skipped:
             print(f"  ~ {s}")
-    return 0 if not stats.errors else 1
+    if stats.visual_failed:
+        print("Visual failures (pages NOT verified indexed):")
+        for s in stats.visual_failed:
+            print(f"  ! {s}")
+    if stats.visual_skipped:
+        print(f"Visual pages already indexed/skipped: {len(stats.visual_skipped)}")
+    return 0 if not (stats.errors or stats.visual_failed) else 1
 
 
 if __name__ == "__main__":

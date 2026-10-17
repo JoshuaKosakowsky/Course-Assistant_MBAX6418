@@ -136,6 +136,12 @@ def add_file(
         try:
             stats = indexer.index_document(doc.doc_id)
             note += f" · indexed {stats.chunks} chunk(s)"
+            note += (
+                f" · visual {stats.visual_pages} page(s)"
+                if stats.visual_pages else ""
+            )
+            if (indexer.visual is not None and stats.visual_failed):
+                note += f" · visual FAILED ({len(stats.visual_failed)} page(s))"
             if stats.skipped:
                 if indexer.embedder is None:
                     note += " · vectors skipped (keyword-only mode: no embedding configured)"
@@ -247,21 +253,44 @@ def build_ui(store: DocumentStore | None = None, indexer=None) -> gr.Blocks:
     return demo
 
 
-def _production_indexer() -> tuple[DocumentStore, CorpusIndexer]:
+def _production_indexer(
+    store: DocumentStore | None = None, visual_factory=None
+) -> tuple[DocumentStore, CorpusIndexer]:
     """Production startup wiring for ``python -m app.ui``.
 
     Builds the real embedding client from the local .env; when credentials
     are missing or the service is down, the app degrades to keyword-only
     mode (BM25 still works) and never substitutes a fake embedder.
+
+    ``visual_factory`` is an injectable ``(store) -> (VisualIndexer|None,
+    reason)`` for offline tests; the default is production_visual_indexer
+    (feature-detects MSpanny's app.visual_index — before PR #11 merges
+    this reports a reason and keeps the app in text-only mode). Startup
+    runs the visual reconcile ONLY when a visual state file already exists
+    (incremental; zero embedding calls for unchanged pages), so the first
+    boot after enabling the feature never triggers an automatic
+    full-library visual reindex — use ``python -m app.indexing
+    --visual-backfill`` for that.
     """
-    store = DocumentStore()
+    if store is None:
+        store = DocumentStore()
     embedder = None
     try:
         embedder = TextEmbeddingClient()
         print(f"Semantic search: using {embedder.model!r} at {embedder.base_url}")
     except EmbeddingsError as exc:
         print(f"Keyword-only mode (semantic search disabled): {exc}")
-    indexer = CorpusIndexer(store, embedder=embedder)
+    from app.visual import production_visual_indexer
+
+    visual = None
+    factory = visual_factory or production_visual_indexer
+    try:
+        visual, reason = factory(store)
+    except Exception as exc:  # pragma: no cover - factory fails loudly
+        visual, reason = None, f"visual index unavailable: {exc}"
+    if visual is None:
+        print(f"Text-only mode: {reason}")
+    indexer = CorpusIndexer(store, embedder=embedder, visual=visual)
     return store, indexer
 
 

@@ -1,0 +1,74 @@
+======================================================================================
+Rerank demo — Issue #4 Step 2 (RRF fusion -> class multimodal reranker, port 9004)
+Corpus: 3 synthetic 2-page PDFs parsed through the REAL pipeline (page PNGs at
+150 dpi via app.parse). Embeddings: real (9002). Reranker: Qwen3-VL-Reranker-2B.
+======================================================================================
+  parsed finance.pdf: 2 pages; page-001.png exists: True
+  parsed marketing.pdf: 2 pages; page-001.png exists: True
+  parsed operations.pdf: 2 pages; page-001.png exists: True
+
+Index: docs=3 keyword_chunks=6 vector_chunks=6
+
+Q: 'What is free cash flow?'   (expected: finance.pdf)
+  fused top-5:    [('finance.pdf', 1, ['keyword', 'vector']), ('finance.pdf', 2, ['keyword', 'vector']), ('operations.pdf', 2, ['keyword', 'vector']), ('operations.pdf', 1, ['vector']), ('marketing.pdf', 1, ['vector'])]
+  reranked text-only  [APPLIED] images_included=False
+      #1 finance.pdf p1 score=0.6970253586769104 img=False <-- EXPECTED
+      #2 finance.pdf p2 score=0.37393829226493835 img=False <-- EXPECTED
+      #3 operations.pdf p1 score=0.2611628472805023 img=False
+      #4 operations.pdf p2 score=0.13878361880779266 img=False
+      #5 marketing.pdf p1 score=0.10872954875230789 img=False
+  reranked image-aware [APPLIED] images_included=True
+      #1 finance.pdf p1 score=0.732606828212738 img=True <-- EXPECTED
+      #2 finance.pdf p2 score=0.30840569734573364 img=True <-- EXPECTED
+      #3 operations.pdf p1 score=0.26092782616615295 img=True
+      #4 operations.pdf p2 score=0.20887988805770874 img=True
+      #5 marketing.pdf p1 score=0.16441532969474792 img=True
+  expected-doc position: fused#1 -> reranked#1  (unchanged/na)
+
+Q: 'How is brand positioning defined?'   (expected: marketing.pdf)
+  fused top-5:    [('marketing.pdf', 1, ['keyword', 'vector']), ('marketing.pdf', 2, ['vector']), ('operations.pdf', 1, ['vector']), ('operations.pdf', 2, ['vector']), ('finance.pdf', 1, ['vector'])]
+  reranked text-only  [APPLIED] images_included=False
+      #1 marketing.pdf p1 score=0.7946854829788208 img=False <-- EXPECTED
+      #2 marketing.pdf p2 score=0.3033093810081482 img=False <-- EXPECTED
+      #3 operations.pdf p2 score=0.10870399326086044 img=False
+      #4 finance.pdf p1 score=0.10314033180475235 img=False
+      #5 operations.pdf p1 score=0.09550522267818451 img=False
+  reranked image-aware [APPLIED] images_included=True
+      #1 marketing.pdf p1 score=0.8279473185539246 img=True <-- EXPECTED
+      #2 marketing.pdf p2 score=0.27413803339004517 img=True <-- EXPECTED
+      #3 operations.pdf p2 score=0.19233712553977966 img=True
+      #4 operations.pdf p1 score=0.18230165541172028 img=True
+      #5 finance.pdf p1 score=0.17876887321472168 img=True
+  expected-doc position: fused#1 -> reranked#1  (unchanged/na)
+
+Q: 'How do companies manage inventory costs?'   (expected: operations.pdf)
+  fused top-5:    [('operations.pdf', 1, ['keyword', 'vector']), ('marketing.pdf', 1, ['keyword', 'vector']), ('marketing.pdf', 2, ['vector']), ('finance.pdf', 1, ['vector']), ('operations.pdf', 2, ['vector'])]
+  reranked text-only  [APPLIED] images_included=False
+      #1 operations.pdf p1 score=0.5830587148666382 img=False <-- EXPECTED
+      #2 operations.pdf p2 score=0.40777787566185 img=False <-- EXPECTED
+      #3 marketing.pdf p2 score=0.21192558109760284 img=False
+      #4 finance.pdf p1 score=0.1979953944683075 img=False
+      #5 marketing.pdf p1 score=0.12428956478834152 img=False
+  reranked image-aware [APPLIED] images_included=True
+      #1 operations.pdf p1 score=0.5929681658744812 img=True <-- EXPECTED
+      #2 operations.pdf p2 score=0.33313873410224915 img=True <-- EXPECTED
+      #3 finance.pdf p1 score=0.20682451128959656 img=True
+      #4 marketing.pdf p2 score=0.19063398241996765 img=True
+      #5 marketing.pdf p1 score=0.16263072192668915 img=True
+  expected-doc position: fused#1 -> reranked#1  (unchanged/na)
+
+Q: 'What would a company be worth?'   (expected: finance.pdf)
+  fused top-5:    [('finance.pdf', 1, ['vector']), ('operations.pdf', 1, ['vector']), ('marketing.pdf', 2, ['vector']), ('marketing.pdf', 1, ['vector']), ('operations.pdf', 2, ['vector'])]
+  reranked text-only  [APPLIED] images_included=False
+      #1 finance.pdf p1 score=0.4114663600921631 img=False <-- EXPECTED
+      #2 operations.pdf p1 score=0.2782862186431885 img=False
+      #3 marketing.pdf p1 score=0.2577072083950043 img=False
+      #4 operations.pdf p2 score=0.2545640766620636 img=False
+      #5 marketing.pdf p2 score=0.21864068508148193 img=False
+  reranked image-aware [APPLIED] images_included=True
+      #1 finance.pdf p1 score=0.3431300222873688 img=True <-- EXPECTED
+      #2 operations.pdf p2 score=0.26156359910964966 img=True
+      #3 operations.pdf p1 score=0.25533774495124817 img=True
+      #4 marketing.pdf p1 score=0.23914974927902222 img=True
+      #5 marketing.pdf p2 score=0.23615749180316925 img=True
+  expected-doc position: fused#1 -> reranked#1  (unchanged/na)

@@ -30,6 +30,7 @@ Mutation semantics mirror ``app.keyword.KeywordIndex``:
 
 from __future__ import annotations
 
+import weakref
 from pathlib import Path
 from typing import List, Optional, Sequence
 
@@ -42,6 +43,23 @@ from app.keyword import Hit
 
 TEXT_COLLECTION = "course_text_chunks"
 VISUAL_COLLECTION = "course_visual_chunks"  # reserved; created in Phase 2 (visual)
+
+
+def _close_chroma_client(client: chromadb.ClientAPI) -> None:
+    """Release the OS handles of a ChromaDB client.
+
+    Every PersistentClient pins sqlite/rocksdb file handles that survive
+    GC; in long-running processes (or big offline suites) this exhausts
+    the Windows handle table and later file opens fail with
+    'Too many open files'. Each TextVectorIndex registers a finalizer so
+    the handles die with the index."""
+    try:
+        client.close()
+    except Exception:  # pragma: no cover - teardown best effort
+        try:
+            client._system.stop()  # type: ignore[attr-defined]
+        except Exception:
+            pass
 
 
 def _metadata(chunk: Chunk) -> dict:
@@ -75,6 +93,7 @@ class TextVectorIndex:
             self._client = chromadb.PersistentClient(
                 path=str(persist_dir), settings=settings
             )
+            weakref.finalize(self, _close_chroma_client, self._client)
         self._collection = self._client.get_or_create_collection(
             name=collection_name, metadata={"hnsw:space": "cosine"}
         )

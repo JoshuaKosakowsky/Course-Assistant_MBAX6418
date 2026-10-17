@@ -31,12 +31,16 @@ TEXT_EMBED_BASE_URL = os.getenv("BASE_URL_TEXT_EMBED", "http://dobolyi.com:9002/
 TEXT_EMBED_MODEL = os.getenv("TEXT_EMBED_MODEL", "nvidia/Nemotron-3-Embed-1B-BF16")
 TEXT_EMBED_API_KEY = os.getenv("CLASS_API_KEY", "")
 
+RERANK_BASE_URL = os.getenv("BASE_URL_RERANK", "http://dobolyi.com:9004/v1")
+RERANK_MODEL = os.getenv("RERANK_MODEL", "Qwen/Qwen3-VL-Reranker-2B")
+RERANK_API_KEY = os.getenv("CLASS_API_KEY_RERANK") or os.getenv("CLASS_API_KEY", "")
+
 # Visual embeddings (page/slide images + text-to-image bridge; class
 # service, OpenAI-compatible /v1/embeddings). Port follows the team's
 # Phase 0 notes (Qwen3-VL on 9003); the exact model name must be set in
 # .env before live use.
 VISUAL_EMBED_BASE_URL = os.getenv("BASE_URL_VISUAL_EMBED", "http://dobolyi.com:9003/v1")
-VISUAL_EMBED_MODEL = os.getenv("VISUAL_EMBED_MODEL", "")
+VISUAL_EMBED_MODEL = os.getenv("VISUAL_EMBED_MODEL", "Qwen/Qwen3-VL-Embedding-2B")
 VISUAL_EMBED_API_KEY = os.getenv("CLASS_API_KEY", "")
 
 APP_HOST = os.getenv("APP_HOST", "127.0.0.1")
