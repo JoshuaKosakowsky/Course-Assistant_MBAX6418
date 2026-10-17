@@ -89,28 +89,49 @@ class QnaOrchestrator:
         answer = parsed.answer if parsed.answer.strip() else MISSING_INFO_FALLBACK
 
         # A grounded answer must cite sources that (a) exist in the supplied
-        # evidence — fabricated document/page/excerpt citations are dropped —
-        # and (b) actually support the answer's claims. Anything else is
-        # normalized to the honest not-in-materials state.
+        # evidence — fabricated document/page/excerpt/image citations are
+        # dropped, with image paths always derived from evidence, never the
+        # model — and (b) actually support the answer's claims. Any
+        # ungrounded path returns the evidence-safe fallback rather than the
+        # model's raw text, so unsupported claims can never reach the UI.
         grounded = parsed.grounded and bool(parsed.sources)
         if not grounded:
-            return QnaResult(answer=answer, grounded=False)
+            logger.warning("Model answer not grounded; returning evidence-safe fallback")
+            return QnaResult(answer=MISSING_INFO_FALLBACK, grounded=False)
 
         sources = tuple(parsed.sources)
         citation_checks = verify_citations(sources, tuple(evidence))
-        verified = tuple(s for s, ck in zip(sources, citation_checks) if ck.valid)
+        verified = tuple(
+            Source(
+                document=s.document,
+                page=s.page,
+                excerpt=s.excerpt,
+                image_path=ck.image_path,  # evidence-derived (None if fabricated/missing)
+            )
+            for s, ck in zip(sources, citation_checks)
+            if ck.valid
+        )
         if not verified:
-            logger.warning("No citation verified against evidence; answer treated as ungrounded")
-            return QnaResult(answer=answer, grounded=False, citation_checks=citation_checks)
+            logger.warning("No citation verified against evidence; returning evidence-safe fallback")
+            return QnaResult(
+                answer=MISSING_INFO_FALLBACK, grounded=False, citation_checks=citation_checks
+            )
 
         checks = check_sources(answer, verified)
-        if all(c.verdict == "unsupported" for c in checks):
-            logger.warning("No source supports the answer; answer treated as ungrounded")
-            return QnaResult(answer=answer, grounded=False, citation_checks=citation_checks)
+        supported = tuple(s for s, ck in zip(verified, checks) if ck.verdict == "supported")
+        if not supported:
+            logger.warning("No source confidently supports the answer; returning evidence-safe fallback")
+            return QnaResult(
+                answer=MISSING_INFO_FALLBACK,
+                grounded=False,
+                citation_checks=citation_checks,
+                source_checks=checks,
+            )
+        presented = tuple(s for s, ck in zip(verified, checks) if ck.verdict != "unsupported")
 
         return QnaResult(
             answer=answer,
-            sources=verified,
+            sources=presented,
             grounded=True,
             source_checks=checks,
             citation_checks=citation_checks,

@@ -163,3 +163,103 @@ def test_grounded_string_false_is_normalized_to_not_grounded():
     llm = StubLLM('{"answer": "unknown", "grounded": "false", "sources": []}')
     result = QnaOrchestrator(llm).answer("q", ())
     assert result.grounded is False
+
+
+def test_unsupported_answer_text_is_replaced_by_fallback():
+    """Regression: ungrounded paths must never surface the model's raw text —
+    a claim with no valid supporting evidence is replaced wholesale."""
+    evidence = (Source(document="syllabus.pdf", page=1, excerpt="Grading policy is posted on Canvas."),)
+    answer = (
+        '{"answer": "The final exam is Friday.", "grounded": true, "sources": ['
+        '{"document": "syllabus.pdf", "page": 1, "excerpt": "Grading policy is posted on Canvas."}]}'
+    )
+    result = QnaOrchestrator(StubLLM(answer)).answer("When is the final?", evidence)
+    assert result.grounded is False
+    assert result.answer == MISSING_INFO_FALLBACK
+    assert "final exam is Friday" not in result.answer
+
+
+def test_ungrounded_claim_never_reaches_ui():
+    """A grounded:false model reply that still states a claim must be replaced
+    by the evidence-safe fallback, not passed through."""
+    claim = '{"answer": "The final exam is Friday.", "grounded": false, "sources": []}'
+    result = QnaOrchestrator(StubLLM(claim)).answer("When is the final?", ())
+    assert result.grounded is False
+    assert result.answer == MISSING_INFO_FALLBACK
+    assert "Friday" not in result.answer
+
+
+def test_unverified_fabricated_citation_replaced_by_fallback():
+    """No citation survives verification -> evidence-safe fallback text."""
+    evidence = (Source(document="rag-lecture.pdf", page=3, excerpt="RAG combines retrieval with generation."),)
+    answer = (
+        '{"answer": "The secret is out.", "grounded": true, "sources": ['
+        '{"document": "secret-notes.pdf", "page": 9, "excerpt": "Top secret."}]}'
+    )
+    result = QnaOrchestrator(StubLLM(answer)).answer("What is the secret?", evidence)
+    assert result.grounded is False
+    assert result.answer == MISSING_INFO_FALLBACK
+    assert "secret is out" not in result.answer
+
+
+def test_fabricated_image_path_never_reaches_sources():
+    """Citation authentic in doc/page/excerpt but image path fabricated:
+    the citation survives, but the image path is dropped (evidence-derived)."""
+    evidence = (Source(document="rag-lecture.pdf", page=3, excerpt="RAG combines retrieval with generation.",
+                       image_path="slides/rag3.png"),)
+    answer = (
+        '{"answer": "RAG combines retrieval with generation per the lecture.", "grounded": true, "sources": ['
+        '{"document": "rag-lecture.pdf", "page": 3, "excerpt": "RAG combines retrieval with generation.", '
+        '"image_path": "/etc/passwd"}]}'
+    )
+    result = QnaOrchestrator(StubLLM(answer)).answer("What is RAG?", evidence)
+    assert result.grounded is True
+    assert result.sources[0].image_path is None
+    assert "discarded" in result.citation_checks[0].reason
+
+
+def test_model_image_path_derived_from_evidence_when_matching():
+    """A model-supplied image path is kept only as the evidence's own path."""
+    evidence = (Source(document="rag-lecture.pdf", page=3, excerpt="RAG combines retrieval with generation.",
+                       image_path="slides/rag3.png"),)
+    answer = (
+        '{"answer": "RAG combines retrieval with generation per the lecture.", "grounded": true, "sources": ['
+        '{"document": "rag-lecture.pdf", "page": 3, "excerpt": "RAG combines retrieval with generation.", '
+        '"image_path": "slides/rag3.png"}]}'
+    )
+    result = QnaOrchestrator(StubLLM(answer)).answer("What is RAG?", evidence)
+    assert result.grounded is True
+    assert result.sources[0].image_path == "slides/rag3.png"
+
+
+def test_contradictory_facts_never_grounded():
+    """Answer citing an authentic excerpt whose facts contradict the answer
+    (different exam date) must not be presented as grounded."""
+    evidence = (Source(document="syllabus.pdf", page=1, excerpt="The exam is on October 15 in week 15 of the course."),)
+    answer = (
+        '{"answer": "The exam is on October 20.", "grounded": true, "sources": ['
+        '{"document": "syllabus.pdf", "page": 1, "excerpt": "The exam is on October 15 in week 15 of the course."}]}'
+    )
+    result = QnaOrchestrator(StubLLM(answer)).answer("When is the exam?", evidence)
+    assert result.grounded is False
+    assert result.answer == MISSING_INFO_FALLBACK
+    assert result.source_checks and result.source_checks[0].verdict == "weak"
+
+
+def test_mixed_support_presents_only_supported_sources():
+    """One supported + one unsupported citation: grounded, but only the
+    supported source is presented; the unsupported verdict stays diagnostic."""
+    evidence = (
+        Source(document="rag-lecture.pdf", page=3, excerpt="RAG combines retrieval with generation."),
+        Source(document="syllabus.pdf", page=1, excerpt="Office hours are on Tuesdays."),
+    )
+    answer = (
+        '{"answer": "RAG combines retrieval with generation per the lecture.", "grounded": true, "sources": ['
+        '{"document": "rag-lecture.pdf", "page": 3, "excerpt": "RAG combines retrieval with generation."},'
+        '{"document": "syllabus.pdf", "page": 1, "excerpt": "Office hours are on Tuesdays."}]}'
+    )
+    result = QnaOrchestrator(StubLLM(answer)).answer("What is RAG?", evidence)
+    assert result.grounded is True
+    assert [s.document for s in result.sources] == ["rag-lecture.pdf"]
+    assert all(ck.valid for ck in result.citation_checks)  # both citations were authentic
+    assert [ck.verdict for ck in result.source_checks] == ["supported", "unsupported"]
