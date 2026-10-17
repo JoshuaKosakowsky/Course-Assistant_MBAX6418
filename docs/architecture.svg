@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="830" viewBox="0 0 1200 830" role="img" aria-labelledby="title desc">
+<title id="title">Course Assistant architecture</title>
+<desc id="desc">Local PDF and PPTX preparation feeds separate keyword, text-vector and visual-vector indexes. Reciprocal rank fusion and the class multimodal reranker create verified evidence for the vision Q and A and quiz models shown in Gradio.</desc>
+<defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8" fill="none" stroke="#475569" stroke-width="1.4"/></marker></defs>
+<rect width="1200" height="830" fill="#f8fafc"/>
+<g font-family="Arial, sans-serif" fill="#0f172a">
+<text x="40" y="45" font-size="27" font-weight="bold">Course Assistant: from original material to cited answers</text>
+<text x="40" y="74" font-size="15" fill="#475569">Python + Gradio run locally. Class model services run at dobolyi.com on ports 9001-9004.</text>
+<g stroke="#475569" stroke-width="1.5">
+<rect x="40" y="110" width="210" height="105" rx="12" fill="#fff"/>
+<rect x="300" y="110" width="310" height="105" rx="12" fill="#fff"/>
+<rect x="675" y="110" width="475" height="105" rx="12" fill="#e0f2fe"/>
+<rect x="40" y="295" width="330" height="100" rx="12" fill="#eef2ff"/>
+<rect x="430" y="295" width="330" height="100" rx="12" fill="#eef2ff"/>
+<rect x="820" y="295" width="330" height="100" rx="12" fill="#eef2ff"/>
+<rect x="40" y="470" width="270" height="110" rx="12" fill="#fff"/>
+<rect x="350" y="470" width="270" height="110" rx="12" fill="#e0f2fe"/>
+<rect x="660" y="470" width="490" height="110" rx="12" fill="#dcfce7"/>
+<rect x="40" y="650" width="530" height="110" rx="12" fill="#e0f2fe"/>
+<rect x="620" y="650" width="530" height="110" rx="12" fill="#fff7ed"/>
+</g>
+<g font-size="18" font-weight="bold">
+<text x="60" y="143">Course files</text><text x="320" y="143">Local preparation</text><text x="695" y="143">Gradio student interface</text>
+<text x="60" y="329">Keyword index</text><text x="450" y="329">Text-vector index</text><text x="840" y="329">Visual-vector index</text>
+<text x="60" y="504">Reciprocal rank fusion</text><text x="370" y="504">Multimodal reranking</text><text x="680" y="504">Evidence pack</text>
+<text x="60" y="685">Vision generation and checks: class port 9001</text><text x="640" y="685">Cited study results in Gradio</text>
+</g>
+<g font-size="15">
+<text x="60" y="173">PDF or PPTX uploads</text><text x="60" y="197">Content deduplication</text>
+<text x="320" y="173">PyMuPDF; PPTX via LibreOffice</text><text x="320" y="197">Page text + original PNGs + metadata</text>
+<text x="695" y="173">Manage materials; choose documents; ask questions</text><text x="695" y="197">Generate quizzes; submit or explicitly reveal solutions</text>
+<text x="60" y="358">bm25s, in memory</text><text x="60" y="382">Text chunks retain document/page IDs</text>
+<text x="450" y="358">ChromaDB; class port 9002</text><text x="450" y="382">Nemotron text embeddings</text>
+<text x="840" y="358">Separate ChromaDB; class port 9003</text><text x="840" y="382">Qwen3-VL; same model for query text</text>
+<text x="60" y="535">Combine ranked text/image hits</text><text x="60" y="559">Aggregate pages; retain identity</text>
+<text x="370" y="535">Qwen3-VL, class port 9004</text><text x="370" y="559">Explicit fallback if unavailable</text>
+<text x="680" y="535">Ranked excerpts + manifest-verified original images</text><text x="680" y="559">Document/page provenance and retrieval-stage health</text>
+<text x="60" y="715">Qwen vision model; structured Q&amp;A and question generation</text><text x="60" y="740">Citation checks; optional visual support judgement; safe failures</text>
+<text x="640" y="715">Answers + excerpts + original slide images</text><text x="640" y="740">Server-held quiz keys, scoring, explanations, bounded replay</text>
+</g>
+<g fill="none" stroke="#475569" stroke-width="2" marker-end="url(#arrow)">
+<path d="M250 162H300"/><path d="M455 215V250H205V295"/><path d="M455 250H595V295"/><path d="M455 250H985V295"/>
+<path d="M205 395V435H175V470"/><path d="M595 395V435H175V470"/><path d="M985 395V435H175V470"/>
+<path d="M310 525H350"/><path d="M620 525H660"/><path d="M905 580V615H305V650"/><path d="M570 705H620"/>
+</g>
+<text x="40" y="801" font-size="14" fill="#475569">Keys stay server-side in .env. Deletion purges indexes. Synthetic tests and screenshots do not establish live course-answer quality.</text>
+</g></svg>

@@ -27,7 +27,7 @@ class QnaParseError(ValueError):
 class Source:
     document: str
     page: int
-    excerpt: str
+    excerpt: str | None
     image_path: str | None = None
 
 
@@ -138,14 +138,15 @@ def parse_answer(raw: str) -> ParsedAnswer:
         excerpt = entry.get("excerpt")
         if not isinstance(document, str) or not document.strip():
             raise QnaParseError("source missing non-empty 'document'")
-        if not isinstance(excerpt, str) or not excerpt.strip():
-            raise QnaParseError("source missing non-empty 'excerpt'")
         image_path = entry.get("image_path")
+        if not isinstance(excerpt, str) or not excerpt.strip():
+            if excerpt is not None or not isinstance(image_path, str) or not image_path.strip():
+                raise QnaParseError("source missing excerpt or original image")
         sources.append(
             Source(
                 document=document.strip(),
                 page=_coerce_page(entry.get("page")),
-                excerpt=excerpt.strip(),
+                excerpt=excerpt.strip() if isinstance(excerpt, str) else None,
                 image_path=image_path if isinstance(image_path, str) and image_path else None,
             )
         )

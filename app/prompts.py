@@ -39,6 +39,8 @@ _RULES = """\
   excerpts, page numbers, or images.
 - When a diagram or chart in the provided images answers the question,
   reference that image and say what to look for in it.
+- For visual evidence, copy its supplied image_path exactly. An image-only
+  source has excerpt=null: preserve null, never invent text for it.
 
 ## Output contract
 Reply with ONLY a single JSON object, no prose outside it:
@@ -79,6 +81,8 @@ def _evidence_text(question: str, evidence: Sequence[Source]) -> str:
     lines = [f"Question: {question}", "", "Evidence (numbered):"]
     for i, source in enumerate(evidence, start=1):
         lines.append(f"[{i}] ({source.document}, page {source.page}): {source.excerpt}")
+        if source.image_path:
+            lines.append(f"Original image_path: {source.image_path}")
     return "\n".join(lines)
 
 

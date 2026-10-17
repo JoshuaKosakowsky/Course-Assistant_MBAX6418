@@ -99,8 +99,8 @@ def check_sources(answer: str, sources: tuple[Source, ...]) -> tuple[SourceCheck
     """Heuristic per-source support check, ordered by source index."""
     checks = []
     for i, source in enumerate(sources):
-        overlap = overlap_fraction(answer, source.excerpt)
-        conflict = factual_conflict(answer, source.excerpt)
+        overlap = overlap_fraction(answer, source.excerpt or "")
+        conflict = factual_conflict(answer, source.excerpt) if source.excerpt else False
         checks.append(
             SourceCheck(index=i, overlap=overlap, verdict=_verdict(overlap, conflict), conflict=conflict)
         )
@@ -150,7 +150,13 @@ def verify_citations(
             checks.append(
                 CitationCheck(i, False, f"no evidence for ({src.document}, page {src.page})")
             )
-        elif any(_normalize(src.excerpt) in _normalize(e.excerpt) for e in matches):
+        elif src.excerpt is None:
+            image = next((e.image_path for e in matches
+                          if e.image_path and src.image_path
+                          and _path_key(e.image_path) == _path_key(src.image_path)), None)
+            checks.append(CitationCheck(i, bool(image), "original image matches evidence" if image
+                                        else "original image not found in evidence", image))
+        elif any(e.excerpt and _normalize(src.excerpt) in _normalize(e.excerpt) for e in matches):
             if src.image_path:
                 evidence_path = next(
                     (e.image_path for e in matches if e.image_path and _path_key(e.image_path) == _path_key(src.image_path)),
@@ -217,8 +223,8 @@ def judge_sources(
             supported = coerce_bool(verdict_obj.get("supported"))
         except (QnaParseError, json.JSONDecodeError, TypeError, ValueError):
             supported = None  # fall back to the heuristic below
-        heuristic = overlap_fraction(answer, source.excerpt)
-        conflict = factual_conflict(answer, source.excerpt)
+        heuristic = overlap_fraction(answer, source.excerpt or "")
+        conflict = factual_conflict(answer, source.excerpt) if source.excerpt else False
         if supported is None:
             final = _verdict(heuristic, conflict)
         elif supported:

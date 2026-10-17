@@ -53,9 +53,10 @@ class QnaConfig:
 class QnaOrchestrator:
     """Answer a question from evidence with structured, verified output."""
 
-    def __init__(self, llm: Any, config: QnaConfig | None = None):
+    def __init__(self, llm: Any, config: QnaConfig | None = None, *, visual_verifier=None):
         self.llm = llm
         self.config = config or QnaConfig()
+        self.visual_verifier = visual_verifier
 
     def answer(self, question: str, evidence: Sequence[Source] = ()) -> QnaResult:
         messages = build_messages(
@@ -118,6 +119,13 @@ class QnaOrchestrator:
             )
 
         checks = check_sources(answer, verified)
+        if self.visual_verifier is not None:
+            checks = tuple(
+                SourceCheck(ck.index, ck.overlap, "supported", False)
+                if (source.image_path and ck.verdict != "supported"
+                    and self.visual_verifier(answer, source) is True) else ck
+                for source, ck in zip(verified, checks)
+            )
         supported = tuple(s for s, ck in zip(verified, checks) if ck.verdict == "supported")
         if not supported:
             logger.warning("No source confidently supports the answer; returning evidence-safe fallback")

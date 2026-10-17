@@ -10,9 +10,11 @@ Backend modules support source-grounded Q&A and multiple-choice quizzes.
 **Status:** Backend components for Phases 1–6 are merged into `main`, and
 CI is green; that does not mean every phase is fully integrated or
 validated. Issues #7 (Gradio student flow) and #8 (automated checks +
-design comparison) still have outstanding acceptance items. The Ask
-Questions tab is a placeholder, and quiz generation needs explicit
-provider wiring at startup. See [limitations](#limitations-and-untested-areas).
+design comparison) still have outstanding live acceptance items. Ask Questions
+and Practice Quiz are connected at startup to configured retrieval and vision
+services. Offline browser verification uses synthetic material and an injected
+model; it does not establish course-answer quality. See
+[limitations](#limitations-and-untested-areas).
 
 **CI is green:** the checked `main` run reports **838 passed, 2 skipped,
 14 deselected** (roughly 840 offline unit/smoke checks). See the
@@ -28,8 +30,8 @@ artifacts describe those historical runs, not the current suite.
 | Parsing | Per-page text, metadata, original page PNGs | Local PDF parser; PPTX needs LibreOffice |
 | Keyword retrieval | BM25 over page-preserving text chunks | Library Lookup works without class calls |
 | Hybrid retrieval | BM25 + text vectors + separate visual vectors, fusion, optional rerank | Backend service; depends on configuration |
-| Q&A | Vision-model adapter, structured answers, citation/support checks | Backend implemented; Ask Questions tab unconnected |
-| Quiz | Evidence-scoped generation, fixed key, hidden solutions, scoring | UI handlers implemented; startup provider missing |
+| Q&A | Vision-model adapter, structured answers, citation/support checks | Ask Questions tab; requires vision configuration |
+| Quiz | Evidence-scoped generation, fixed key, hidden solutions, scoring | Practice Quiz tab; requires vision configuration |
 
 - **Materials:** `python -m app.ingest` accepts PDF and PPTX. Content hashes
   prevent duplicate imports. Removal deletes the registered corpus copy,
@@ -135,9 +137,15 @@ reuses existing text vectors. Missing vectors may require live embedding
 requests. With unavailable embeddings, keyword retrieval remains available;
 production never substitutes fake embeddings. A fresh clone starts empty.
 
-The Ask Questions tab does not yet accept questions. Practice Quiz controls
-are present, but Generate reports that generation is not connected until a
-provider is passed to `build_ui`. Configuration alone does not wire either flow.
+In **Ask Questions**, select materials, enter a question, and choose **Ask
+question**. Inspect the answer, document/page excerpts, and original slide
+images. Missing evidence and unavailable services produce explicit messages.
+In **Practice Quiz**, select materials, optionally filter by a literal topic
+substring, choose one to five questions and a seed, then generate. Submit all
+answers for a score, or deliberately reveal solutions without grading.
+Explanations and verified source images appear after submission/reveal.
+Missing or template vision settings disable generation safely. See
+[study UI details](docs/STUDY_UI.md) for configuration and verification limits.
 
 ### CLI ingestion and indexing
 
@@ -183,6 +191,8 @@ Neither a clean clone nor the offline test suite needs the team's course files.
 
 ## Architecture
 
+![Course Assistant preparation, separate retrieval indexes, reranking and generation](docs/architecture.svg)
+
 ```text
 course PDF/PPTX -> parse locally (text + original page/slide images)
                       |
@@ -201,8 +211,8 @@ course PDF/PPTX -> parse locally (text + original page/slide images)
                  vision Q&A backend          quiz provider + model
                  {answer, sources}           server-held quiz/session
                               \                   /
-                          Gradio integration boundary
-                    Q&A pending; quiz provider injection needed
+                           Gradio student interface
+                     Ask Questions + Practice Quiz tabs
 
 BM25 keyword index -> Library Lookup -> verbatim passages in Gradio
 ```
@@ -238,9 +248,17 @@ name and page number. Lookup runs BM25 keyword search (`app/lookup.py`),
 so this demonstrates keyword retrieval on an indexed synthetic PDF — not
 the hybrid retrieval pipeline. Content shown is synthetic only.
 
-Q&A and quiz flow screenshots are being captured and will be added after the
-corresponding flows are connected and verified. They are not included here;
-no placeholder or generated screenshots stand in for working flows.
+![Connected Q&A with a supporting original synthetic slide](results/study-qna-light-offline.png)
+
+![Quiz scoring and source feedback on synthetic material](results/study-quiz-offline.png)
+
+These are real browser captures of the connected controls, using a generated
+synthetic PDF and an explicitly injected model response. They demonstrate
+interface behavior, original-image display, scoring, and feedback; they do
+not demonstrate live course-answer quality. Light and dark Q&A views were
+checked. Reproduce the offline browser fixture with
+`python -m scripts.preview_study_ui`; production uses `python -m app.ui`.
+See [the integration verification record](results/study-ui-verification.md).
 
 ## Findings and design decisions
 
@@ -343,11 +361,9 @@ Visual request format and roundtrip scope are documented in
 
 ## Limitations and untested areas
 
-- **Q&A UI is not wired.** `app/ui.py` displays a placeholder in Ask Questions;
-  there is no connected retrieval/model answer callback in that tab.
-- **Quiz startup is not wired.** The entry point calls `build_ui(store, indexer)`
-  without `quiz_provider`. Generate works only after supplying a provider;
-  filling `.env` does not make the current launch generate questions.
+- **Live student-flow acceptance remains outstanding.** Q&A and quiz startup
+  are connected, with offline browser checks. Representative course-material
+  evaluation and real-service browser checks are still required.
 - **Visual model configuration is provisional.** The model name in
   `.env.example` is a placeholder requiring an authenticated model check.
   The template must not be treated as a guarantee of service/model access.
@@ -360,7 +376,8 @@ Visual request format and roundtrip scope are documented in
   parsing and BM25 Lookup work offline; full generation does not.
 - **Port 9000 is reserved for Hermes.** Never use it for a class service.
 - **Evidence validation is not factual proof.** Default Q&A support checking
-  uses heuristics; valid quiz source identity does not prove an answer correct.
+  uses text heuristics and an additional vision judgement for eligible visual
+  claims; valid quiz source identity does not prove an answer correct.
   Broad live factual-answer and adversarial evaluation remain outstanding.
 - **Synthetic evaluations are small.** Reported scores do not establish
   performance on the full course corpus, real student questions, or other

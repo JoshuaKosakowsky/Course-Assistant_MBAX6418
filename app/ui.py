@@ -29,6 +29,7 @@ from .lookup import lookup_question
 from .ingest import add_and_parse
 from .parse import ConversionError, UnsupportedFormatError
 from .quiz_ui import QuizController
+from .study_ui import QnaController, production_study_services
 
 SUPPORTED_LABEL = (
     "**Supported formats:** PDF (direct) · PPTX (auto-converted — needs "
@@ -64,6 +65,23 @@ LOOKUP_CSS = """
 #lookup-button:focus-visible, #lookup-button button:focus-visible {
     outline: 2px solid #2563eb;
     outline-offset: 3px;
+}
+#answer-gallery .grid-container, #quiz-gallery .grid-container {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    grid-template-rows: minmax(0, 1fr) !important;
+    height: 100% !important;
+}
+#answer-gallery .gallery-item, #quiz-gallery .gallery-item,
+#answer-gallery .thumbnail-item, #quiz-gallery .thumbnail-item {
+    min-height: 0 !important;
+    height: 100% !important;
+    width: 100% !important;
+    aspect-ratio: auto !important;
+}
+#answer-gallery .thumbnail-item img, #quiz-gallery .thumbnail-item img {
+    width: 100%;
+    height: 100%;
+    object-fit: contain !important;
 }
 """
 
@@ -211,9 +229,9 @@ def select_library_document(
     return gr.update(value=doc_id)
 
 
-def build_ui(store: DocumentStore | None = None, indexer=None, quiz_provider=None) -> gr.Blocks:
+def build_ui(store: DocumentStore | None = None, indexer=None, quiz_provider=None,
+             *, retrieval=None, qna=None, connect_services=False) -> gr.Blocks:
     store = store or DocumentStore()
-    quiz_controller = QuizController(quiz_provider, store=store)
 
     if indexer is not None:
         indexer.register_hooks()
@@ -221,6 +239,14 @@ def build_ui(store: DocumentStore | None = None, indexer=None, quiz_provider=Non
             indexer.reconcile()
         except Exception as exc:
             print(f"index reconciliation failed: {exc}")
+
+    # Reconcile replaces the in-memory keyword index: bind retrieval AFTER it.
+    if connect_services and indexer is not None:
+        retrieval, qna, quiz_provider = production_study_services(indexer)
+    quiz_controller = QuizController(quiz_provider, store=store, unavailable_message=(
+        "Quiz generation is unavailable. Configure the server-side vision model and restart the app."
+        if connect_services and quiz_provider is None else None))
+    qna_controller = QnaController(store, retrieval, qna)
 
     with gr.Blocks(title="Course Assistant") as demo:
         gr.Markdown("# Course Assistant")
@@ -263,11 +289,18 @@ def build_ui(store: DocumentStore | None = None, indexer=None, quiz_provider=Non
 
             with gr.Tab("Ask Questions"):
                 gr.Markdown(
-                    "Ask questions about your uploaded course materials."
+                    "Ask about text, pictures, diagrams, or charts in your selected materials. "
+                    "Answers use retrieved evidence; unavailable information is acknowledged."
                 )
-                gr.Markdown(
-                    "*Evidence-backed Q&A will be connected here.*"
+                question_materials = gr.CheckboxGroup(
+                    label="Materials for your question", choices=_choices(store),
                 )
+                question = gr.Textbox(label="Your question", lines=2, max_length=2000)
+                ask_button = gr.Button("Ask question", variant="primary")
+                answer_status = gr.Markdown()
+                answer_output = gr.HTML(label="Answer and sources")
+                answer_images = gr.Gallery(label="Supporting original slides and pages", columns=2, rows=1,
+                                           object_fit="contain", height=420, elem_id="answer-gallery")
 
             with gr.Tab("Practice Quiz"):
                 gr.Markdown("### Create a practice quiz")
@@ -324,8 +357,15 @@ def build_ui(store: DocumentStore | None = None, indexer=None, quiz_provider=Non
                     label="Verified original page images",
                     visible=True,
                     columns=2,
+                    rows=1,
                     height=300,
+                    object_fit="contain",
+                    elem_id="quiz-gallery",
                 )
+
+        for event in (ask_button.click, question.submit):
+            event(qna_controller.ask, inputs=[question_materials, question],
+                  outputs=[answer_status, answer_output, answer_images], api_name=False)
 
         generate_button.click(
             quiz_controller.generate,
@@ -403,6 +443,10 @@ def build_ui(store: DocumentStore | None = None, indexer=None, quiz_provider=Non
             lambda: gr.update(choices=_choices(store), value=[]),
             inputs=[], outputs=[quiz_materials], api_name=False,
         )
+        add_event.then(
+            lambda: gr.update(choices=_choices(store), value=[]),
+            outputs=[question_materials], api_name=False,
+        )
 
         remove_event = remove_button.click(
             lambda choice: _library_updates(store, remove_selected(store, choice)[2]),
@@ -417,6 +461,13 @@ def build_ui(store: DocumentStore | None = None, indexer=None, quiz_provider=Non
             lambda: gr.update(choices=_choices(store), value=[]),
             inputs=[], outputs=[quiz_materials], api_name=False,
         )
+        remove_event.then(
+            lambda: gr.update(choices=_choices(store), value=[]),
+            outputs=[question_materials], api_name=False,
+        )
+
+        demo.load(lambda: gr.update(choices=_choices(store), value=[]),
+                  outputs=[question_materials], api_name=False)
 
         demo.load(
             lambda: gr.update(choices=_choices(store), value=[]),
@@ -477,6 +528,6 @@ def _production_indexer(
 
 if __name__ == "__main__":
     store, indexer = _production_indexer()
-    build_ui(store, indexer).launch(
+    build_ui(store, indexer, connect_services=True).launch(
         server_name=APP_HOST, server_port=APP_PORT, inbrowser=False, css=LOOKUP_CSS
     )
