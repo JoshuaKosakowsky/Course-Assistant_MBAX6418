@@ -219,3 +219,18 @@ def test_grounded_result_without_sources_is_not_displayed(library):
         [doc.doc_id], "retrieval")
     assert "Unsupported text" not in str(result)
     assert "No supported answer" in result[0]
+
+
+def test_source_whitespace_normalization_matches_qna_contract(library):
+    store, indexer, doc = library
+
+    class Model(EvidenceModel):
+        def chat(self, messages):
+            result = json.loads(super().chat(messages))
+            result["sources"][0]["excerpt"] = "retrieval\naugmented   generation quiz prep slides"
+            return json.dumps(result)
+
+    controller = QnaController(store, RetrievalService(indexer.keyword, store=store),
+                               QnaOrchestrator(Model(doc.filename)))
+    status, html, images = controller.ask([doc.doc_id], "retrieval")
+    assert "checked" in status and images and doc.filename in html

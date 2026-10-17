@@ -9,6 +9,10 @@ from app.qna_schema import Source
 from app.quiz_integration import verified_original_image
 
 
+def _normalized_excerpt(text):
+    return " ".join((text or "").split()).casefold()
+
+
 def production_study_services(indexer):
     """Construct clients without network calls, after index reconciliation.
 
@@ -87,7 +91,7 @@ class QnaController:
             for number, source in enumerate(result.sources, 1):
                 matches = [item for item in items
                            if item.filename == source.document and item.page_no == source.page
-                           and ((source.excerpt and source.excerpt.casefold() in (item.excerpt or "").casefold())
+                           and ((source.excerpt and _normalized_excerpt(source.excerpt) in _normalized_excerpt(item.excerpt))
                                 or (source.excerpt is None and source.image_path == self._image(item)
                                     and source.image_path is not None))]
                 if not matches:
