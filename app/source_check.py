@@ -45,20 +45,34 @@ def overlap_fraction(answer: str, excerpt: str) -> float:
     return len(answer_terms & excerpt_terms) / len(answer_terms)
 
 
+def _has_negation(text: str) -> bool:
+    """True when the text contains an explicit negator (case-insensitive)."""
+    return bool(_NEGATION.search(text.lower()))
+
+
 def factual_conflict(answer: str, excerpt: str) -> bool:
     """True when the answer asserts facts the excerpt cannot support.
 
     The overlap heuristic ignores numbers and stopwords (e.g. ``not``), so
     "the exam is on October 20" and "the exam is on October 15" share every
     content term. Numbers and explicit negation are compared explicitly:
-    any answer number absent from the excerpt, or a negator present only on
-    one side, means support cannot be certified.
+
+    - any answer number absent from the excerpt means support cannot be
+      certified;
+    - negation polarity is compared in BOTH directions with case
+      normalization: an affirmative claim against a negated excerpt (and
+      vice versa) contradicts it. "The exam is on Friday" vs "The exam is
+      NOT on Friday" (either side negated) is a conflict; matching polarity
+      ("...is not on Friday" vs "...is not on Friday") is not.
+
+    Conservative by design: a negator on exactly one side of a claim the
+    answer shares may downgrade an otherwise-correct answer to weak rather
+    than certify uncertain support — the safe failure for a grounding layer.
     """
     answer_numbers = _NUMBER.findall(answer)
     if answer_numbers and any(n not in _NUMBER.findall(excerpt) for n in answer_numbers):
         return True
-    answer_negation = set(_NEGATION.findall(answer))
-    return bool(answer_negation) and not (answer_negation & set(_NEGATION.findall(excerpt)))
+    return _has_negation(answer) != _has_negation(excerpt)
 
 
 @dataclass(frozen=True)

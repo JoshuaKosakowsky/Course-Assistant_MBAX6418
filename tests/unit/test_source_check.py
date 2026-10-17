@@ -189,10 +189,51 @@ def test_shared_negation_is_not_a_conflict():
     assert check.verdict == "supported"
 
 
+def test_evidence_negation_conflicts_with_affirmative_answer():
+    """Answer affirmative, evidence negated — the reverse of the previous
+    case, which the asymmetrical check used to miss."""
+    src = Source(document="d", page=1, excerpt="The exam is not on Friday in week 15.")
+    check = check_sources("The exam is on Friday.", (src,))[0]
+    assert check.conflict is True
+    assert check.overlap >= SUPPORTED_THRESHOLD
+    assert check.verdict == "weak"
+
+
+def test_uppercase_negation_is_detected():
+    src = Source(document="d", page=1, excerpt="The exam is on Friday in week 15.")
+    check = check_sources("The exam is NOT on Friday.", (src,))[0]
+    assert check.conflict is True
+    assert check.verdict == "weak"  # case-normalized negation never certified
+
+
+def test_uppercase_negation_in_evidence_is_detected():
+    src = Source(document="d", page=1, excerpt="The exam is NOT on Friday this semester.")
+    check = check_sources("The exam is on Friday.", (src,))[0]
+    assert check.conflict is True
+    assert check.verdict == "weak"
+
+
+def test_matching_negative_claims_still_supported():
+    src = Source(document="d", page=1, excerpt="The exam is NOT on Friday this semester.")
+    check = check_sources("The exam is not on Friday.", (src,))[0]
+    assert check.conflict is False
+    assert check.verdict == "supported"
+
+
+def test_affirmative_claim_with_affirmative_evidence_still_supported():
+    """Control: genuinely supported affirmative claims must stay supported."""
+    src = Source(document="d", page=1, excerpt="The exam is on Friday in week 15.")
+    check = check_sources("The exam is on Friday.", (src,))[0]
+    assert check.conflict is False
+    assert check.verdict == "supported"
+
+
 def test_factual_conflict_flag():
     assert factual_conflict("5 credits", "4 credits") is True
     assert factual_conflict("October 20", "October 20") is False
     assert factual_conflict("not on Friday", "on Friday") is True
+    assert factual_conflict("on Friday", "not on Friday") is True  # either direction
+    assert factual_conflict("NOT on Friday", "on Friday") is True  # case-insensitive
     assert factual_conflict("not on Friday", "not on Friday") is False
     assert factual_conflict("no make-up", "no make-up") is False
     assert factual_conflict("plain text", "plain text") is False
@@ -203,6 +244,16 @@ def test_judge_conflict_caps_supported_to_weak():
     judge = JudgeStub([True])  # judge says supported, but facts conflict
     check = judge_sources("The exam is not on Friday.", (src,), judge)[0]
     assert check.verdict == "weak"  # judge cannot overturn a factual conflict
+
+
+def test_judge_cannot_promote_evidence_side_negation():
+    """Judge says supported, but the EVIDENCE is negated while the answer is
+    affirmative — the judge must not certify the contradiction."""
+    src = Source(document="d", page=1, excerpt="The exam is not on Friday in week 15.")
+    judge = JudgeStub([True])
+    check = judge_sources("The exam is on Friday.", (src,), judge)[0]
+    assert check.conflict is True
+    assert check.verdict == "weak"
 
 
 # -- image path provenance -------------------------------------------------

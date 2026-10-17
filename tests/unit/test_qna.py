@@ -246,6 +246,46 @@ def test_contradictory_facts_never_grounded():
     assert result.source_checks and result.source_checks[0].verdict == "weak"
 
 
+def test_negated_evidence_never_grounds_affirmative_answer():
+    """Regression (review round 3): affirmative answer citing negated evidence
+    must not be presented as grounded — previously conflict=False/supported."""
+    evidence = (Source(document="syllabus.pdf", page=1, excerpt="The exam is not on Friday in week 15 of the course."),)
+    answer = (
+        '{"answer": "The exam is on Friday.", "grounded": true, "sources": ['
+        '{"document": "syllabus.pdf", "page": 1, "excerpt": "The exam is not on Friday in week 15 of the course."}]}'
+    )
+    result = QnaOrchestrator(StubLLM(answer)).answer("When is the exam?", evidence)
+    assert result.grounded is False
+    assert result.answer == MISSING_INFO_FALLBACK
+    assert result.source_checks and result.source_checks[0].verdict == "weak"
+
+
+def test_negated_answer_against_affirmative_evidence_never_grounded():
+    """The original direction, with an UPPERCASE negator in the answer."""
+    evidence = (Source(document="syllabus.pdf", page=1, excerpt="The exam is on Friday in week 15 of the course."),)
+    answer = (
+        '{"answer": "The exam is NOT on Friday.", "grounded": true, "sources": ['
+        '{"document": "syllabus.pdf", "page": 1, "excerpt": "The exam is on Friday in week 15 of the course."}]}'
+    )
+    result = QnaOrchestrator(StubLLM(answer)).answer("When is the exam?", evidence)
+    assert result.grounded is False
+    assert result.answer == MISSING_INFO_FALLBACK
+    assert result.source_checks and result.source_checks[0].verdict == "weak"
+
+
+def test_matching_negative_claims_remain_grounded():
+    """Control: answer and evidence both negated — same polarity, supported."""
+    evidence = (Source(document="syllabus.pdf", page=1, excerpt="The exam is not on Friday this semester."),)
+    answer = (
+        '{"answer": "The exam is not on Friday.", "grounded": true, "sources": ['
+        '{"document": "syllabus.pdf", "page": 1, "excerpt": "The exam is not on Friday this semester."}]}'
+    )
+    result = QnaOrchestrator(StubLLM(answer)).answer("When is the exam?", evidence)
+    assert result.grounded is True
+    assert result.sources and result.sources[0].document == "syllabus.pdf"
+    assert result.source_checks and result.source_checks[0].verdict == "supported"
+
+
 def test_mixed_support_presents_only_supported_sources():
     """One supported + one unsupported citation: grounded, but only the
     supported source is presented; the unsupported verdict stays diagnostic."""
