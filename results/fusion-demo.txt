@@ -1,0 +1,53 @@
+====================================================================================
+Fusion demo — Issue #4 Step 1 (RRF over BM25 + text embeddings)
+Corpus: 3 synthetic 2-page PDFs (finance / marketing / operations).
+====================================================================================
+
+SECTION A — OFFLINE with FakeEmbedder (deterministic, repeatable).
+NOTE: fake vectors are bag-of-words hashes; retrieval differences here are
+STRUCTURAL (dedupe, rank boost, provenance), not semantic quality.
+
+query: 'free cash flow'   (expected: finance.pdf)
+  BM25 top3:    [('finance.pdf', 1, 1.465), ('finance.pdf', 2, 0.762), ('operations.pdf', 2, 0.294)]  -> expected in list: YES
+  vector top3:  [('finance.pdf', 1, 0.772), ('finance.pdf', 2, 0.641)]  -> expected in list: YES
+  fused top3:   [('finance.pdf', 1, 0.0328, ['keyword', 'vector']), ('finance.pdf', 2, 0.0323, ['keyword', 'vector']), ('operations.pdf', 2, 0.0159, ['keyword'])]  -> expected in list: YES
+query: 'brand positioning'   (expected: marketing.pdf)
+  BM25 top3:    [('marketing.pdf', 1, 1.306)]  -> expected in list: YES
+  vector top3:  [('marketing.pdf', 1, 0.289)]  -> expected in list: YES
+  fused top3:   [('marketing.pdf', 1, 0.0328, ['keyword', 'vector'])]  -> expected in list: YES
+query: 'inventory management'   (expected: operations.pdf)
+  BM25 top3:    [('operations.pdf', 1, 1.306)]  -> expected in list: YES
+  vector top3:  [('operations.pdf', 1, 0.535)]  -> expected in list: YES
+  fused top3:   [('operations.pdf', 1, 0.0328, ['keyword', 'vector'])]  -> expected in list: YES
+query: 'company purchase price estimation'   (expected: finance.pdf)
+  BM25 top3:    []  -> expected in list: no
+  vector top3:  [('finance.pdf', 1, 0.134)]  -> expected in list: YES
+  fused top3:   [('finance.pdf', 1, 0.0164, ['vector'])]  -> expected in list: YES
+query: 'what is a firm worth'   (expected: finance.pdf)
+  BM25 top3:    []  -> expected in list: no
+  vector top3:  [('finance.pdf', 2, 0.248), ('finance.pdf', 1, 0.239), ('marketing.pdf', 1, 0.183)]  -> expected in list: YES
+  fused top3:   [('finance.pdf', 2, 0.0164, ['vector']), ('finance.pdf', 1, 0.0161, ['vector']), ('marketing.pdf', 1, 0.0159, ['vector'])]  -> expected in list: YES
+
+SECTION B — LIVE with real Nemotron text embeddings (port 9002).
+Measured comparison; fusion benefits are real semantic effects only here.
+
+query: 'free cash flow'   (expected: finance.pdf)
+  BM25 top3:   [('finance.pdf', 1, 1.465), ('finance.pdf', 2, 0.762), ('operations.pdf', 2, 0.294)]  [top1='finance.pdf']
+  vector top3: [('finance.pdf', 1, 0.798), ('marketing.pdf', 1, 0.634), ('operations.pdf', 1, 0.624)]  [top1='finance.pdf']
+  fused top3:  [('finance.pdf', 1, 0.0328, ['keyword', 'vector']), ('finance.pdf', 2, 0.0315, ['keyword', 'vector']), ('operations.pdf', 2, 0.031, ['keyword', 'vector'])]  [top1='finance.pdf']
+query: 'brand positioning'   (expected: marketing.pdf)
+  BM25 top3:   [('marketing.pdf', 1, 1.306)]  [top1='marketing.pdf']
+  vector top3: [('marketing.pdf', 1, 0.797), ('operations.pdf', 1, 0.771), ('finance.pdf', 1, 0.77)]  [top1='marketing.pdf']
+  fused top3:  [('marketing.pdf', 1, 0.0328, ['keyword', 'vector']), ('operations.pdf', 1, 0.0161, ['vector']), ('finance.pdf', 1, 0.0159, ['vector'])]  [top1='marketing.pdf']
+query: 'inventory management'   (expected: operations.pdf)
+  BM25 top3:   [('operations.pdf', 1, 1.306)]  [top1='operations.pdf']
+  vector top3: [('marketing.pdf', 1, 0.81), ('operations.pdf', 1, 0.805), ('finance.pdf', 1, 0.775)]  [top1='marketing.pdf']
+  fused top3:  [('operations.pdf', 1, 0.0325, ['keyword', 'vector']), ('marketing.pdf', 1, 0.0164, ['vector']), ('finance.pdf', 1, 0.0159, ['vector'])]  [top1='operations.pdf']
+query: 'company purchase price estimation'   (expected: finance.pdf)
+  BM25 top3:   []  [top1=None]
+  vector top3: [('finance.pdf', 1, 0.763), ('marketing.pdf', 1, 0.734), ('marketing.pdf', 2, 0.722)]  [top1='finance.pdf']
+  fused top3:  [('finance.pdf', 1, 0.0164, ['vector']), ('marketing.pdf', 1, 0.0161, ['vector']), ('marketing.pdf', 2, 0.0159, ['vector'])]  [top1='finance.pdf']
+query: 'what is a firm worth'   (expected: finance.pdf)
+  BM25 top3:   []  [top1=None]
+  vector top3: [('finance.pdf', 1, 0.619), ('marketing.pdf', 1, 0.576), ('operations.pdf', 1, 0.567)]  [top1='finance.pdf']
+  fused top3:  [('finance.pdf', 1, 0.0164, ['vector']), ('marketing.pdf', 1, 0.0161, ['vector']), ('operations.pdf', 1, 0.0159, ['vector'])]  [top1='finance.pdf']
