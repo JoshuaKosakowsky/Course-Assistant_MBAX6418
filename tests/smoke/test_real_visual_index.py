@@ -351,3 +351,218 @@ def test_real_visual_index_cross_pr_integration():
     assert data["equal_count_repaired"] == 1
     assert data["embed_failure_aborted"] is True
     assert data["restart_repaired"] == 0
+
+
+RUNNER_C = r"""
+import importlib.util, json, sys, tempfile
+from pathlib import Path
+
+checkout = Path(sys.argv[1])
+app_dir = checkout / "app"
+spec = importlib.util.spec_from_file_location(
+    "pr11", str(app_dir / "__init__.py"),
+    submodule_search_locations=[str(app_dir)])
+pr11 = importlib.util.module_from_spec(spec)
+sys.modules["pr11"] = pr11
+spec.loader.exec_module(pr11)
+from pr11.visual_index import VisualIndex as RealVisualIndex
+from pr11.visual_embeddings import fake_embedder as real_fake
+
+from app.documents import DocumentStore
+from app.parse import parse_file
+from app.visual import VisualIndexer, VisualState
+
+import pymupdf
+from PIL import Image, ImageDraw
+
+root = Path(tempfile.mkdtemp())
+emb = real_fake(dims=8)
+
+
+class CountingEmbed:
+    def __init__(self, emb):
+        self._emb = emb
+        self.calls = 0
+        self.fail = False
+
+    def __call__(self, image):
+        if self.fail:
+            raise RuntimeError("embedding service down (simulated)")
+        self.calls += 1
+        return self._emb(image)
+
+
+class FailRemoveWrapper:
+    # Real VisualIndex with an injectable eviction failure (harness only;
+    # every other method delegates to the real class).
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.fail_remove = False
+
+    @property
+    def _collection(self):
+        return self._inner._collection
+
+    def add_image(self, *a, **k):
+        return self._inner.add_image(*a, **k)
+
+    def remove_doc(self, doc_id):
+        if self.fail_remove:
+            raise RuntimeError("chroma offline (simulated)")
+        return self._inner.remove_doc(doc_id)
+
+    def count(self):
+        return self._inner.count()
+
+    def query_embedding(self, *a, **k):
+        return self._inner.query_embedding(*a, **k)
+
+
+def make_pdf(path, pages=2):
+    d = pymupdf.open()
+    for i in range(pages):
+        pg = d.new_page()
+        pg.insert_text((72, 72), "Removal regression page %d" % (i + 1))
+    d.save(str(path))
+    d.close()
+    return path
+
+
+def make_img(path, text="page"):
+    im = Image.new("RGB", (40, 40), "white")
+    ImageDraw.Draw(im).text((4, 14), text, fill="black")
+    im.save(path)
+    return path
+
+
+def stored_vec(vi, slot):
+    got = vi._collection.get(include=["embeddings"])
+    smap = dict(zip(got["ids"], got["embeddings"]))
+    return list(smap[slot])
+
+
+def dist(a, b):
+    dot = sum(x * y for x, y in zip(a, b))
+    na = sum(x * x for x in a) ** 0.5 or 1.0
+    nb = sum(y * y for y in b) ** 0.5 or 1.0
+    return 1.0 - dot / (na * nb)
+
+
+store = DocumentStore(root=root / "data")
+rec = store.add(make_pdf(root / "deck.pdf", 2))
+parse_file(store.corpus_path(rec.doc_id), rec.doc_id,
+           store.artifacts_dir / rec.doc_id)
+doc_id = rec.doc_id
+manifest_path = store.artifacts_dir / doc_id / "manifest.json"
+import json as _json
+
+
+def manifest_pages():
+    return _json.loads(manifest_path.read_text(encoding="utf-8"))["pages"]
+
+
+page1_path = Path(manifest_pages()[0]["image_path"])
+
+counter = CountingEmbed(emb)
+story = {}
+vi = FailRemoveWrapper(RealVisualIndex(root=root / "idx", embedder=emb))
+visual = VisualIndexer(vi, counter, store, state=VisualState(root / "vs.json"))
+
+# 1) two pages indexed through the DIRECT path
+visual.index_document(doc_id)
+assert vi.count() == 2, vi.count()
+assert counter.calls == 2
+
+# 2) page 2 REMOVED from the manifest -> DIRECT index must evict its slot
+raw = _json.loads(manifest_path.read_text(encoding="utf-8"))
+raw["pages"] = raw["pages"][:1]
+manifest_path.write_text(_json.dumps(raw), encoding="utf-8")
+calls_before = counter.calls
+stats = visual.index_document(doc_id)          # direct path
+assert not stats.visual_failed, stats.visual_failed
+slots = set(vi._collection.get(include=["metadatas"])["ids"])
+assert slots == {f"{doc_id}:1"}, slots          # page-2 slot evicted
+assert len(visual.state.get(doc_id)) == 1       # state has ONLY page 1
+calls_after_removal = counter.calls             # incl. the replace preflight
+
+# 3) unchanged reconcile: ZERO embeddings
+stats2 = visual.reconcile()
+assert stats2.visual_repaired == 0
+story["reconcile_zero_embeds"] = counter.calls == calls_after_removal
+
+# 4) RESTART (fresh indexer + fresh state load + fresh handle, same data):
+#    reconcile again: ZERO embeddings
+visual2 = VisualIndexer(FailRemoveWrapper(
+    RealVisualIndex(root=root / "idx", embedder=emb)),
+    counter, store, state=VisualState(root / "vs.json"))
+stats3 = visual2.reconcile()
+assert stats3.visual_repaired == 0
+story["restart_zero_embeds"] = counter.calls == calls_after_removal
+
+# 5) PREFLIGHT failure (embedding down): changed page 1 must ABORT with
+#    the old vector and state intact
+make_img(page1_path, "changed page-1 content")
+vec_ok = stored_vec(visual2.backend, f"{doc_id}:1")
+counter.fail = True
+sf = visual2.index_document(doc_id)
+assert sf.visual_failed                       # preflight abort reported
+assert visual2.backend.count() == 1           # nothing evicted
+assert dist(stored_vec(visual2.backend, f"{doc_id}:1"), vec_ok) < 1e-9
+assert len(visual2.state.get(doc_id)) == 1    # state intact
+counter.fail = False
+sr = visual2.index_document(doc_id)           # recovery
+assert not sr.visual_failed
+assert dist(stored_vec(visual2.backend, f"{doc_id}:1"), vec_ok) > 0.01
+
+# 6) EVICTION failure: changed page 1 must ABORT with old vector+state kept
+make_img(page1_path, "another page-1 content")
+vec_ok2 = stored_vec(visual2.backend, f"{doc_id}:1")
+visual2.backend.fail_remove = True
+se = visual2.index_document(doc_id)
+assert any("eviction failed" in f for f in se.visual_failed)
+assert visual2.backend.count() == 1
+assert dist(stored_vec(visual2.backend, f"{doc_id}:1"), vec_ok2) < 1e-9
+assert len(visual2.state.get(doc_id)) == 1
+visual2.backend.fail_remove = False
+sr2 = visual2.index_document(doc_id)          # recovery
+assert not sr2.visual_failed
+assert visual2.backend.count() == 1
+
+print(json.dumps({
+    "slots_after_removal": sorted(slots),
+    "state_pages_after_removal": len(visual.state.get(doc_id)),
+    "reconcile_zero_embeds": story["reconcile_zero_embeds"],
+    "restart_zero_embeds": story["restart_zero_embeds"],
+    "preflight_preserved": True,
+    "eviction_preserved": True,
+}))
+"""
+
+
+# (suite C: Joshua review round — manifest page-removal via the DIRECT
+#  index_document path against the REAL persistent VisualIndex)
+@requires_worktree
+def test_real_visual_index_manifest_removal_direct_path():
+    """REGRESSION (Joshua's CHANGES_REQUESTED): a previously tracked page
+    REMOVED from the manifest must be evicted by direct index_document()
+    (not just reconcile), its state entry dropped, and later reconciles
+    (including after restart) must perform ZERO embeddings. Preflight and
+    eviction failures preserve the surviving vector and state."""
+    checkout = _target_checkout()
+    result = subprocess.run(
+        [sys.executable, "-c", RUNNER_C, str(checkout)],
+        cwd=str(REPO_ROOT),
+        env={**os.environ, "PYTHONPATH": str(REPO_ROOT),
+             "PYTHONIOENCODING": "utf-8"},
+        capture_output=True, text=True, timeout=240,
+    )
+    assert result.returncode == 0, result.stderr[-3000:]
+    data = json.loads(result.stdout.strip().splitlines()[-1])
+    assert len(data["slots_after_removal"]) == 1
+    assert data["slots_after_removal"][0].endswith(":1")
+    assert data["state_pages_after_removal"] == 1
+    assert data["reconcile_zero_embeds"] is True
+    assert data["restart_zero_embeds"] is True
+    assert data["preflight_preserved"] is True
+    assert data["eviction_preserved"] is True

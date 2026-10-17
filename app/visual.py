@@ -340,10 +340,15 @@ class VisualIndexer:
         return stats
 
     def _has_changed_page(self, doc_id: str, pages) -> bool:
-        """True when any TRACKED page's image file changed or vanished."""
+        """True when any TRACKED page changed, vanished, or was REMOVED
+        from the manifest (a tracked page's slot must not linger when the
+        manifest no longer lists it)."""
         state = self.state.get(doc_id)
         if not state:
             return False
+        manifest_pages = {str(p) for p, _ in pages}
+        if set(state) - manifest_pages:
+            return True  # previously indexed page removed from manifest
         for page_no, image_path in pages:
             entry = state.get(str(page_no))
             if entry is None:
@@ -436,6 +441,16 @@ class VisualIndexer:
                 self.state.drop_page(doc_id, page_no)
         stats.visual_pages = added
         stats.visual_added = added
+        # OBsolete tracking entries: state may still hold pages that are
+        # NOT part of the current manifest (they were evicted above and
+        # intentionally not re-added). Keep ONLY restored pages, so a
+        # later reconcile never treats the removed pages as 'missing' and
+        # never re-embeds surviving pages to chase them. (This runs only
+        # AFTER a successful eviction — preflight and eviction failures
+        # returned earlier with state untouched.)
+        for stale_page in [p for p in self.state.get(doc_id)
+                           if int(p) not in ready]:
+            self.state.drop_page(doc_id, int(stale_page))
         if added == len(ready):
             # full success: never retry again; a stale pending-removal
             # marker is moot (slot-uspsert ids are per (doc, page), so the
