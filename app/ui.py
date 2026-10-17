@@ -173,7 +173,7 @@ def remove_selected(store: DocumentStore, choice: str | None) -> tuple[pd.DataFr
 
 def build_ui(store: DocumentStore | None = None, indexer=None, quiz_provider=None) -> gr.Blocks:
     store = store or DocumentStore()
-    quiz_controller = QuizController(quiz_provider)
+    quiz_controller = QuizController(quiz_provider, store=store)
 
     if indexer is not None:
         indexer.register_hooks()
@@ -279,11 +279,17 @@ def build_ui(store: DocumentStore | None = None, indexer=None, quiz_provider=Non
                     reveal_button = gr.Button("Reveal Answers")
                 quiz_score = gr.Markdown()
                 quiz_feedback = gr.Markdown()
+                quiz_images = gr.Gallery(
+                    label="Verified original page images",
+                    visible=True,
+                    columns=2,
+                    height=300,
+                )
 
         generate_button.click(
             quiz_controller.generate,
             inputs=[quiz_materials, quiz_topic, quiz_count, quiz_seed],
-            outputs=[quiz_status, *quiz_answers, quiz_score, quiz_feedback],
+            outputs=[quiz_status, *quiz_answers, quiz_score, quiz_feedback, quiz_images],
             api_name=False,
         )
 
@@ -295,11 +301,11 @@ def build_ui(store: DocumentStore | None = None, indexer=None, quiz_provider=Non
 
         submit_button.click(
             submit_quiz, inputs=quiz_answers,
-            outputs=[quiz_score, quiz_feedback], api_name=False,
+            outputs=[quiz_score, quiz_feedback, quiz_images], api_name=False,
         )
         reveal_button.click(
             reveal_quiz, inputs=quiz_answers,
-            outputs=[quiz_score, quiz_feedback], api_name=False,
+            outputs=[quiz_score, quiz_feedback, quiz_images], api_name=False,
         )
 
         gr.Markdown("## Lookup", elem_id="lookup-heading")

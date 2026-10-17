@@ -4,6 +4,7 @@ Builds the Blocks app and exercises the add/remove handlers against a
 temporary store. Offline — no class endpoints, no real course files.
 """
 
+from threading import Event, Thread
 import pytest
 
 import app.parse as parse
@@ -60,3 +61,87 @@ def test_pptx_without_libreoffice_rolls_back_and_warns(store, tmp_path, monkeypa
     assert len(df) == 0
     assert store.list() == []  # rolled back so a retry works after installing LibreOffice
     assert "LibreOffice" in status
+
+
+def test_quiz_material_refresh_waits_for_document_mutations(store):
+    demo = build_ui(store)
+    dependencies = demo.config["dependencies"]
+
+    for action in ("add_file", "remove_selected"):
+        matches = [
+            (index, event)
+            for index, event in enumerate(dependencies)
+            if event.get("api_name") == action
+        ]
+        assert len(matches) == 1
+        event_index, _ = matches[0]
+
+        refreshes = [
+            event
+            for event in dependencies
+            if event.get("trigger_after") == event_index
+        ]
+
+        assert len(refreshes) == 1
+        refresh = refreshes[0]
+
+        # The quiz selector must be updated after the mutation.
+        quiz_selector = next(
+            component["id"]
+            for component in demo.config["components"]
+            if component.get("props", {}).get("label") == "Course materials"
+        )
+        assert refresh["outputs"] == [quiz_selector]
+        assert refresh["trigger_only_on_success"] is False
+
+
+def test_delayed_document_mutations_refresh_choices_after_completion(
+    store, tiny_pdf, monkeypatch
+):
+    import app.ui as ui
+
+    original_add = ui.add_file
+    original_remove = ui.remove_selected
+
+    for action in ("add", "remove"):
+        if action == "remove":
+            original_add(store, str(tiny_pdf))
+            doc_id = store.list()[0].doc_id
+
+        started = Event()
+        release = Event()
+        results = []
+
+        def delayed_operation():
+            started.set()
+            if not release.wait(timeout=5):
+                raise TimeoutError("Delayed operation was not released")
+            if action == "add":
+                return original_add(store, str(tiny_pdf))
+            return original_remove(store, doc_id)
+
+        def worker():
+            results.append(delayed_operation())
+            results.append(ui._choices(store))
+
+        thread = Thread(target=worker)
+        thread.start()
+
+        try:
+            assert started.wait(timeout=5)
+            assert results == []
+
+            release.set()
+            thread.join(timeout=10)
+
+            assert not thread.is_alive()
+            assert len(results) == 2
+
+            choices = results[1]
+            if action == "add":
+                assert len(choices) == 1
+            else:
+                assert choices == []
+        finally:
+            release.set()
+            thread.join(timeout=10)

@@ -46,3 +46,51 @@ def evidence_from_pack(pack: object) -> tuple[EvidenceRef, ...]:
             continue
         refs.append(EvidenceRef(filename, page, excerpt, image_path, doc_id))
     return tuple(refs)
+
+
+def verified_original_image(store, evidence: dict) -> str | None:
+    """Return only a registered original page image; otherwise fail closed."""
+    import json
+    from pathlib import Path
+
+    doc_id = evidence.get("doc_id")
+    page = evidence.get("page")
+    claimed_path = evidence.get("image_path")
+
+    if not isinstance(doc_id, str) or not doc_id:
+        return None
+    if type(page) is not int or page < 1:
+        return None
+    if not isinstance(claimed_path, str) or not claimed_path:
+        return None
+
+    try:
+        store.get(doc_id)
+        root = (store.artifacts_dir / doc_id).resolve()
+        manifest = json.loads(
+            (root / "manifest.json").read_text(encoding="utf-8")
+        )
+
+        if manifest.get("doc_id") != doc_id:
+            return None
+
+        for item in manifest.get("pages", []):
+            if item.get("number") != page:
+                continue
+
+            original = Path(item["image_path"]).resolve()
+            claimed = Path(claimed_path).resolve()
+
+            if original != claimed:
+                return None
+            if not original.is_relative_to(root / "pages"):
+                return None
+            if not original.is_file() or original.suffix.lower() != ".png":
+                return None
+
+            return str(original)
+
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+    return None

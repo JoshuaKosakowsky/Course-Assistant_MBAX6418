@@ -28,8 +28,8 @@ class EvidenceRef:
             raise ValueError("doc_id must be a non-empty string or None")
 
     def public(self) -> dict:
-        return {"document": self.document, "page": self.page,
-                "excerpt": self.excerpt, "image_path": self.image_path}
+        return {"doc_id": self.doc_id, "document": self.document, "page": self.page,
+                "excerpt": self.excerpt, "image_path": self.image_path, }
 
 
 @dataclass(frozen=True)
