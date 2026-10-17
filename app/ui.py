@@ -22,7 +22,7 @@ import gradio as gr
 import pandas as pd
 
 from .config import APP_HOST, APP_PORT
-from .documents import DocumentNotFoundError, DocumentStore
+from .documents import Document, DocumentNotFoundError, DocumentStore
 from .embeddings import EmbeddingsError, TextEmbeddingClient
 from .indexing import CorpusIndexer
 from .lookup import lookup_question
@@ -75,9 +75,12 @@ def _file_path(file) -> str | None:
     return getattr(file, "path", None) or str(file)
 
 
-def _library_df(store: DocumentStore) -> pd.DataFrame:
+def _library_df(
+    store: DocumentStore, documents: tuple[Document, ...] | None = None
+) -> pd.DataFrame:
     rows = []
-    for doc in store.list():
+    snapshot = store.list() if documents is None else documents
+    for doc in snapshot:
         manifest = store.artifacts_dir / doc.doc_id / "manifest.json"
         pages = "—"
         if manifest.is_file():
@@ -94,8 +97,11 @@ def _library_df(store: DocumentStore) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=TABLE_COLUMNS)
 
 
-def _choices(store: DocumentStore) -> list[tuple[str, str]]:
-    return [(doc.filename, doc.doc_id) for doc in store.list()]
+def _choices(
+    store: DocumentStore, documents: tuple[Document, ...] | None = None
+) -> list[tuple[str, str]]:
+    snapshot = store.list() if documents is None else documents
+    return [(doc.filename, doc.doc_id) for doc in snapshot]
 
 
 def add_file(
@@ -160,6 +166,9 @@ def remove_selected(store: DocumentStore, choice: str | None) -> tuple[pd.DataFr
     """Remove the selected document (cascade delete); returns the refreshed UI."""
     if not choice:
         return _library_df(store), _choices(store), "Select a document to remove first."
+    if (not isinstance(choice, str) or len(choice) != 16
+            or any(char not in '0123456789abcdef' for char in choice)):
+        return _library_df(store), _choices(store), "Select a valid document from the Library to remove."
     try:
         doc = store.get(choice)
         store.remove(choice)
@@ -169,6 +178,37 @@ def remove_selected(store: DocumentStore, choice: str | None) -> tuple[pd.DataFr
     except Exception as exc:  # pragma: no cover - upstream failure surface
         message = f"Remove failed: {exc}"
     return _library_df(store), _choices(store), message
+
+
+def _library_updates(store: DocumentStore, message: str) -> tuple:
+    """Build every displayed row and selectable identity from one listing.
+
+    Filenames are display labels, not identities: different documents may share
+    a name. Never assemble a view from independently read tables and choices.
+    """
+    documents = tuple(store.list())
+    frame = _library_df(store, documents)
+    choices = _choices(store, documents)
+    row_ids = [doc.doc_id for doc in documents]
+    return frame, gr.update(choices=choices, value=None), message, row_ids
+
+
+def select_library_document(
+    store: DocumentStore, row_ids: list[str], event: gr.SelectData
+) -> dict:
+    """Resolve the clicked original row against this session's displayed IDs."""
+    if not event.selected or not isinstance(event.index, (list, tuple)) or not event.index:
+        return gr.update(value=None)
+    row = event.index[0]
+    if (not isinstance(row, int) or isinstance(row, bool)
+            or not isinstance(row_ids, list) or not 0 <= row < len(row_ids)):
+        return gr.update(value=None)
+    doc_id = row_ids[row]
+    try:
+        store.get(doc_id)
+    except DocumentNotFoundError:
+        return gr.update(value=None)
+    return gr.update(value=doc_id)
 
 
 def build_ui(store: DocumentStore | None = None, indexer=None, quiz_provider=None) -> gr.Blocks:
@@ -201,6 +241,7 @@ def build_ui(store: DocumentStore | None = None, indexer=None, quiz_provider=Non
                         "Add to library", variant="primary"
                     )
 
+                library_row_ids = gr.State([])
                 library_table = gr.Dataframe(
                     label="Library",
                     headers=TABLE_COLUMNS,
@@ -338,13 +379,24 @@ def build_ui(store: DocumentStore | None = None, indexer=None, quiz_provider=Non
             api_name="lookup_submit",
         )
 
+        def on_library_select(row_ids, event: gr.SelectData):
+            return select_library_document(store, row_ids, event)
+
+        library_table.select(
+            on_library_select,
+            inputs=[library_row_ids],
+            outputs=[document_dropdown],
+            api_name=False,
+            concurrency_id="library",
+            concurrency_limit=1,
+        )
         add_event = add_button.click(
-            lambda f, store=store, indexer=indexer: add_file(
-                store, f, indexer
-            ),
+            lambda f: _library_updates(store, add_file(store, f, indexer)[2]),
             inputs=[file_input],
-            outputs=[library_table, document_dropdown, status],
+            outputs=[library_table, document_dropdown, status, library_row_ids],
             api_name="add_file",
+            concurrency_id="library",
+            concurrency_limit=1,
         )
 
         add_event.then(
@@ -353,10 +405,12 @@ def build_ui(store: DocumentStore | None = None, indexer=None, quiz_provider=Non
         )
 
         remove_event = remove_button.click(
-            lambda c, store=store: remove_selected(store, c),
+            lambda choice: _library_updates(store, remove_selected(store, choice)[2]),
             inputs=[document_dropdown],
-            outputs=[library_table, document_dropdown, status],
+            outputs=[library_table, document_dropdown, status, library_row_ids],
             api_name="remove_selected",
+            concurrency_id="library",
+            concurrency_limit=1,
         )
 
         remove_event.then(
@@ -370,13 +424,11 @@ def build_ui(store: DocumentStore | None = None, indexer=None, quiz_provider=Non
         )
 
         demo.load(
-            lambda store=store: (
-                _library_df(store),
-                _choices(store),
-                "Ready.",
-            ),
-            outputs=[library_table, document_dropdown, status],
+            lambda: _library_updates(store, "Ready."),
+            outputs=[library_table, document_dropdown, status, library_row_ids],
             api_name="load_library",
+            concurrency_id="library",
+            concurrency_limit=1,
         )
 
     return demo
