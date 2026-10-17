@@ -122,7 +122,7 @@ class QnaOrchestrator:
         if self.visual_verifier is not None:
             checks = tuple(
                 SourceCheck(ck.index, ck.overlap, "supported", False)
-                if (source.image_path and ck.verdict != "supported" and not ck.conflict
+                if (source.image_path and ck.verdict != "supported"
                     and self.visual_verifier(answer, source) is True) else ck
                 for source, ck in zip(verified, checks)
             )
