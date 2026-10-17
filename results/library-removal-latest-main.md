@@ -35,4 +35,4 @@ Remove selected deleted only beta, cleared the field, and retained alpha/gamma.
 Lookup then found no beta-only biology text while still retrieving alpha's
 astronomy passage. No real Library documents were deleted during these checks.
 
-No live class-endpoint tests were run. Changes are local, not committed or pushed.
+No live class-endpoint tests were run.
