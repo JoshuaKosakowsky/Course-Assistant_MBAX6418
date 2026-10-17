@@ -22,7 +22,7 @@ import gradio as gr
 import pandas as pd
 
 from .config import APP_HOST, APP_PORT
-from .documents import DocumentNotFoundError, DocumentStore
+from .documents import Document, DocumentNotFoundError, DocumentStore
 from .embeddings import EmbeddingsError, TextEmbeddingClient
 from .indexing import CorpusIndexer
 from .lookup import lookup_question
@@ -75,9 +75,12 @@ def _file_path(file) -> str | None:
     return getattr(file, "path", None) or str(file)
 
 
-def _library_df(store: DocumentStore) -> pd.DataFrame:
+def _library_df(
+    store: DocumentStore, documents: tuple[Document, ...] | None = None
+) -> pd.DataFrame:
     rows = []
-    for doc in store.list():
+    snapshot = store.list() if documents is None else documents
+    for doc in snapshot:
         manifest = store.artifacts_dir / doc.doc_id / "manifest.json"
         pages = "—"
         if manifest.is_file():
@@ -94,8 +97,11 @@ def _library_df(store: DocumentStore) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=TABLE_COLUMNS)
 
 
-def _choices(store: DocumentStore) -> list[tuple[str, str]]:
-    return [(doc.filename, doc.doc_id) for doc in store.list()]
+def _choices(
+    store: DocumentStore, documents: tuple[Document, ...] | None = None
+) -> list[tuple[str, str]]:
+    snapshot = store.list() if documents is None else documents
+    return [(doc.filename, doc.doc_id) for doc in snapshot]
 
 
 def add_file(
@@ -174,12 +180,16 @@ def remove_selected(store: DocumentStore, choice: str | None) -> tuple[pd.DataFr
     return _library_df(store), _choices(store), message
 
 
-def _library_updates(result: tuple[pd.DataFrame, list, str]) -> tuple:
-    """Update choices, clear selection and retain the displayed row identities."""
-    frame, choices, message = result
-    row_ids = [doc_id for _, doc_id in choices]
-    if frame['filename'].tolist() != [name for name, _ in choices]:
-        row_ids = []  # External changes between reads must not select a different file.
+def _library_updates(store: DocumentStore, message: str) -> tuple:
+    """Build every displayed row and selectable identity from one listing.
+
+    Filenames are display labels, not identities: different documents may share
+    a name. Never assemble a view from independently read tables and choices.
+    """
+    documents = tuple(store.list())
+    frame = _library_df(store, documents)
+    choices = _choices(store, documents)
+    row_ids = [doc.doc_id for doc in documents]
     return frame, gr.update(choices=choices, value=None), message, row_ids
 
 
@@ -381,7 +391,7 @@ def build_ui(store: DocumentStore | None = None, indexer=None, quiz_provider=Non
             concurrency_limit=1,
         )
         add_event = add_button.click(
-            lambda f: _library_updates(add_file(store, f, indexer)),
+            lambda f: _library_updates(store, add_file(store, f, indexer)[2]),
             inputs=[file_input],
             outputs=[library_table, document_dropdown, status, library_row_ids],
             api_name="add_file",
@@ -395,7 +405,7 @@ def build_ui(store: DocumentStore | None = None, indexer=None, quiz_provider=Non
         )
 
         remove_event = remove_button.click(
-            lambda choice: _library_updates(remove_selected(store, choice)),
+            lambda choice: _library_updates(store, remove_selected(store, choice)[2]),
             inputs=[document_dropdown],
             outputs=[library_table, document_dropdown, status, library_row_ids],
             api_name="remove_selected",
@@ -414,7 +424,7 @@ def build_ui(store: DocumentStore | None = None, indexer=None, quiz_provider=Non
         )
 
         demo.load(
-            lambda: _library_updates((_library_df(store), _choices(store), "Ready.")),
+            lambda: _library_updates(store, "Ready."),
             outputs=[library_table, document_dropdown, status, library_row_ids],
             api_name="load_library",
             concurrency_id="library",

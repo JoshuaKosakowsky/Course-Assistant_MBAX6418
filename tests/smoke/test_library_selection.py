@@ -1,5 +1,6 @@
 """Row selection and targeted removal, using generated PDFs only."""
 import asyncio
+import json
 
 import gradio as gr
 import pymupdf
@@ -36,9 +37,9 @@ def test_row_selection_uses_stable_id(library):
 
 
 def test_dropdown_options_and_row_ids_are_refreshed_together(library):
-    from app.ui import _choices, _library_df, _library_updates
+    from app.ui import _choices, _library_updates
 
-    frame, update, message, ids = _library_updates((_library_df(library), _choices(library), 'Ready.'))
+    frame, update, message, ids = _library_updates(library, 'Ready.')
     assert update['__type__'] == 'update'
     assert update['value'] is None
     assert update['choices'] == _choices(library)
@@ -158,9 +159,100 @@ def test_duplicate_filenames_keep_distinct_document_ids(library, tmp_path):
         assert select_library_document(library, ids, event)['value'] == doc_id
 
 
-def test_inconsistent_table_snapshot_disables_row_mapping(library):
-    from app.ui import _choices, _library_df, _library_updates
+def test_empty_snapshot_does_not_fall_back_to_another_listing(tmp_path, monkeypatch):
+    from app.ui import TABLE_COLUMNS, _library_updates
 
-    frame = _library_df(library)
-    choices = list(reversed(_choices(library)))
-    assert _library_updates((frame, choices, 'Ready.'))[3] == []
+    store = DocumentStore(root=tmp_path / 'empty')
+    calls = []
+
+    def list_once():
+        calls.append(True)
+        assert len(calls) == 1, 'Empty captured snapshots must not trigger another read'
+        return []
+
+    monkeypatch.setattr(store, 'list', list_once)
+    frame, dropdown, _, row_ids = _library_updates(store, 'Ready.')
+    assert frame.empty
+    assert list(frame.columns) == TABLE_COLUMNS
+    assert dropdown['choices'] == []
+    assert dropdown['value'] is None
+    assert row_ids == []
+    assert len(calls) == 1
+
+
+def test_load_uses_one_snapshot_for_duplicate_filename_identities(tmp_path, monkeypatch):
+    """A second listing has identical names but opposite document identities."""
+    store = DocumentStore(root=tmp_path / 'data')
+    for number in (1, 2):
+        source = tmp_path / str(number) / 'same.pdf'
+        source.parent.mkdir()
+        with pymupdf.open() as pdf:
+            for page_number in range(number):
+                pdf.new_page().insert_text((72, 72), f'Document {number}, page {page_number}')
+            pdf.save(source)
+        add_file(store, str(source))
+    documents = store.list()
+    assert documents[0].filename == documents[1].filename
+    assert documents[0].doc_id != documents[1].doc_id
+    expected_ids = [doc.doc_id for doc in documents]
+    expected_pages = [len(json.loads((store.artifacts_dir / doc.doc_id / 'manifest.json')
+                                    .read_text(encoding='utf-8'))['pages']) for doc in documents]
+    demo = build_ui(store)
+    session = SessionState(demo)
+    load_id = next(number for number, fn in demo.fns.items() if fn.api_name == 'load_library')
+    load_event = next(event for event in demo.config['dependencies'] if event['api_name'] == 'load_library')
+    calls = []
+
+    def changing_list():
+        calls.append(True)
+        return list(documents) if len(calls) == 1 else list(reversed(documents))
+
+    with monkeypatch.context() as patch:
+        patch.setattr(store, 'list', changing_list)
+        loaded = asyncio.run(demo.process_api(load_id, [], state=session))
+    frame, dropdown = loaded['data'][:2]
+    assert [row[2] for row in frame['data']] == expected_pages
+    assert session[load_event['outputs'][-1]] == expected_ids
+    assert [doc_id for _, doc_id in dropdown['choices']] == expected_ids
+    assert len(calls) == 1
+
+    # Row zero must still select/remove the ID whose metadata is displayed there.
+    from app.ui import select_library_document, remove_selected
+    event = gr.SelectData(None, {'index': [0, 0], 'value': 'same.pdf'})
+    selected = select_library_document(store, session[load_event['outputs'][-1]], event)
+    assert selected['value'] == expected_ids[0]
+    remove_selected(store, selected['value'])
+    assert [doc.doc_id for doc in store.list()] == expected_ids[1:]
+
+
+@pytest.mark.parametrize('action', ['add_file', 'remove_selected'])
+def test_mutation_refresh_rebuilds_one_snapshot_not_returned_views(library, monkeypatch, action):
+    """Legacy handler views cannot supply mismatched identity/order to the UI."""
+    import app.ui as ui
+
+    documents = library.list()
+    frame = ui._library_df(library)
+    expected_rows = frame.values.tolist()
+    stale_frame = frame.iloc[::-1].reset_index(drop=True)
+    wrong_choices = list(reversed(ui._choices(library)))
+    demo = build_ui(library)
+    session = SessionState(demo)
+    event_id = next(number for number, fn in demo.fns.items() if fn.api_name == action)
+    event = next(d for d in demo.config['dependencies'] if d['api_name'] == action)
+    calls = []
+
+    def list_once():
+        calls.append(True)
+        assert len(calls) == 1
+        return list(documents)
+
+    monkeypatch.setattr(ui, action, lambda *args: (stale_frame, wrong_choices, 'Operation complete.'))
+    monkeypatch.setattr(library, 'list', list_once)
+    inputs = [None] if action == 'add_file' else [documents[0].doc_id]
+    result = asyncio.run(demo.process_api(event_id, inputs, state=session))
+    expected_ids = [doc.doc_id for doc in documents]
+    assert result['data'][0]['data'] == expected_rows
+    assert [value for _, value in result['data'][1]['choices']] == expected_ids
+    assert session[event['outputs'][-1]] == expected_ids
+    assert result['data'][2] == 'Operation complete.'
+    assert len(calls) == 1

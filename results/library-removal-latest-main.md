@@ -17,7 +17,7 @@ were not changed.
 
 - Baseline offline suite: **831 passed, 1 skipped, 14 deselected**.
 - Regression tests observed failing before the selection/wiring/validation fixes.
-- Full updated offline suite: **850 passed, 1 skipped, 14 deselected**.
+- Latest full offline suite: **861 passed, 1 skipped, 14 deselected**.
 - Existing ChromaDB warning and additional Gradio coroutine-function deprecation
   warnings are dependency warnings, not failing tests.
 - Actual Gradio process_api integration checks session State, row selection,
@@ -36,3 +36,20 @@ Lookup then found no beta-only biology text while still retrieving alpha's
 astronomy passage. No real Library documents were deleted during these checks.
 
 No live class-endpoint tests were run.
+
+## Single-snapshot identity follow-up
+
+The filename-only alignment guard has been removed. `_library_updates(store,
+message)` captures `tuple(store.list())` once and passes that same tuple to table
+and dropdown construction, deriving row IDs from those exact document records.
+Load/add/remove refreshes all use this path. Independently rendered legacy handler
+views are not reused in the displayed update; only the operation status is reused.
+
+The regression creates two distinct PDFs named `same.pdf`, with different page
+counts, and makes any second library listing return the IDs in reverse order.
+Before the fix, the actual Gradio load callback displayed the first snapshot's
+metadata but stored the second snapshot's IDs. After the fix it performs one read,
+keeps metadata/options/IDs aligned, and removes the selected identity rather than
+its same-named neighbor. Additional tests cover empty snapshots and stale views
+returned by add/remove handlers. The 48 visible component definitions still match
+HEAD; the UI and existing quiz refresh callbacks are unchanged.
