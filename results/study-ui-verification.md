@@ -1,8 +1,9 @@
 # Connected study UI verification
 
-Snapshot: Issue #7 integration branch, based on main `dfc0fc4`.
+Snapshot: Issue #7 integration branch, updated through main `faec5b5`
+(including PR #29's single-snapshot library selection fix).
 
-- Final full offline suite: **860 passed, 1 skipped, 14 deselected**.
+- Final full offline suite: **884 passed, 1 skipped, 14 deselected**.
   Live class-service tests were excluded. Tracked-file secret checks passed.
 - The normal `python -m app.ui` entry point also booted from the clean review
   copy without a `.env` or course materials: HTTP 200, keyword-only mode,
@@ -25,6 +26,9 @@ Snapshot: Issue #7 integration branch, based on main `dfc0fc4`.
   unavailable services, selection/removal, escaped HTML, production service
   binding after index reconciliation, quiz provider/replay, image-only
   citations, and strict fail-closed visual support verdicts.
+- After merging the library-selection change, the single document snapshot,
+  duplicate-filename identity regressions, Gradio removal callbacks and both
+  study-material pickers pass together in the full suite.
 
 Screenshots: `study-qna-offline.png`, `study-qna-light-offline.png`, and
 `study-quiz-offline.png`. Every displayed document is labelled synthetic.
