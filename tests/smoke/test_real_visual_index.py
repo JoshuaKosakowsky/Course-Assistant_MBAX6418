@@ -100,10 +100,22 @@ assert thits[0].doc_id == "doc-9" and thits[0].page == 3
 new1 = make_img(root / "new1.png", "changed-page-1-content")
 idx.add_image("doc-9", 1, new1)
 assert idx.count() == 3                       # upsert: never stacked
-hits_old = idx.query_embedding(emb(Image.open(paths[0])), k=3)
-assert hits_old[0].page != 1                  # stale embedding is GONE
+# new content is searchable: exact-embedding query ranks page 1 first
 hits_new = idx.query_embedding(emb(Image.open(new1)), k=3)
 assert hits_new[0].page == 1                  # new content is searchable
+# deterministic replacement check (no ranking luck): the slot now STORES
+# the NEW embedding and no longer stores the old content's vector
+def dist(a, b):
+    dot = sum(x * y for x, y in zip(a, b))
+    na = sum(x * x for x in a) ** 0.5 or 1.0
+    nb = sum(y * y for y in b) ** 0.5 or 1.0
+    return 1.0 - dot / (na * nb)
+stored = idx._collection.get(include=["embeddings"])
+smap = dict(zip(stored["ids"], stored["embeddings"]))
+old_vec1 = emb(Image.open(paths[0]))
+new_vec1 = emb(Image.open(new1))
+assert dist(smap["doc-9:1"], new_vec1) < 1e-6   # slot holds the new content
+assert dist(smap["doc-9:1"], old_vec1) > 0.01   # old content is GONE
 same = idx.add_image("doc-9", 1, new1)        # identical re-index: no-op
 assert same == "doc-9:1" and idx.count() == 3
 
@@ -142,7 +154,7 @@ print(json.dumps({
     "pages": [h.page for h in hits],
     "text_page": thits[0].page,
     "slot_ids": ids,
-    "replaced": hits_old[0].page != 1 and hits_new[0].page == 1,
+    "replaced": bool(dist(smap["doc-9:1"], old_vec1) > 0.01),
     "removed": removed,
     "lost_repaired": restored,
     "twins_present": "doc-a:1" in present and "doc-a:2" in present,
@@ -218,8 +230,18 @@ assert vi.count() == 2, vi.count()
 slots2 = set(vi._collection.get(include=["metadatas"])["ids"])
 assert slots2 == slots, (slots2, slots)
 new_vec = emb(resize_for_embedding(Image.open(page1_path)))
-assert vi.query_embedding(new_vec, k=2)[0].page == 1      # new content
-assert vi.query_embedding(old_vec, k=2)[0].page != 1      # stale gone
+assert vi.query_embedding(new_vec, k=2)[0].page == 1      # new content first
+# deterministic replacement check (no ranking luck): the slot now STORES
+# the NEW embedding; the old content's vector is gone
+def dist(a, b):
+    dot = sum(x * y for x, y in zip(a, b))
+    na = sum(x * x for x in a) ** 0.5 or 1.0
+    nb = sum(y * y for y in b) ** 0.5 or 1.0
+    return 1.0 - dot / (na * nb)
+stored = vi._collection.get(include=["embeddings"])
+smap = dict(zip(stored["ids"], stored["embeddings"]))
+assert dist(smap[f"{doc_id}:1"], new_vec) < 1e-6    # slot holds new content
+assert dist(smap[f"{doc_id}:1"], old_vec) > 0.01    # old content is GONE
 
 # 3) (twin slots are suite A's job — distinct slot ids per page number)
 
