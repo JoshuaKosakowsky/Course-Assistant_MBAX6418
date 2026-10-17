@@ -133,3 +133,75 @@ def test_image_budget_reaches_real_generator_with_ranked_evidence(tmp_path, imag
     assert (ref.doc_id, ref.document, ref.page, ref.excerpt, ref.image_path) == (
         cited.doc_id, cited.filename, cited.page_no, cited.excerpt or None, cited.image_path,
     )
+
+
+@pytest.mark.parametrize("missing_image", [False, True])
+def test_merged_retrieval_service_to_quiz_session(tmp_path, missing_image):
+    """Real parse/BM25/fusion/evidence with fake model; no class services."""
+    import pymupdf
+    from app.documents import DocumentStore
+    from app.indexing import CorpusIndexer
+    from app.parse import parse_file
+    from app.retrieval import RetrievalService
+    from app.evidence import EvidencePack
+
+    store = DocumentStore(root=tmp_path / "data")
+    records = []
+    for folder, text in [
+        ("chosen", "BM25 matches terms. Precision measures relevant retrieved items."),
+        ("foreign", "BM25 foreign document must never enter the selected quiz."),
+    ]:
+        directory = tmp_path / folder
+        directory.mkdir()
+        pdf = directory / "Lecture.pdf"  # same display name, distinct identities
+        document = pymupdf.open()
+        document.new_page().insert_text((72, 72), text)
+        document.save(str(pdf))
+        document.close()
+        record = store.add(pdf)
+        parse_file(store.corpus_path(record.doc_id), record.doc_id,
+                   store.artifacts_dir / record.doc_id)
+        records.append(record)
+    chosen, foreign = records
+    indexer = CorpusIndexer(store, persist_dir=tmp_path / "vectors")
+    for record in records:
+        stats = indexer.index_document(record.doc_id)
+        assert not stats.errors
+    service = RetrievalService(keyword=indexer.keyword, store=store)
+    if missing_image:
+        manifest = json.loads((store.artifacts_dir / chosen.doc_id / "manifest.json").read_text(encoding="utf-8"))
+        Path(manifest["pages"][0]["image_path"]).unlink()
+    outcome = service.retrieve("BM25", doc_ids=(chosen.doc_id,), include_images=True)
+    assert isinstance(outcome.evidence, EvidencePack)
+    assert outcome.evidence.items
+    assert {item.doc_id for item in outcome.evidence.items} == {chosen.doc_id}
+    source = outcome.evidence.items[0]
+    assert source.image_verified is (not missing_image)
+    assert outcome.stages["semantic"] == outcome.stages["rerank"] == "skipped"
+
+    class Model:
+        def chat(self, messages):
+            payload = json.loads(messages[1]["content"])
+            assert payload["evidence"][0]["text"].startswith("BM25 matches terms")
+            assert "foreign document" not in json.dumps(messages)
+            assert ("data:image/" in json.dumps(messages)) is (not missing_image)
+            return json.dumps({"questions": [{
+                "prompt": "Which method matches terms?",
+                "options": ["BM25", "OCR", "ASR", "RNN"],
+                "correct_index": 0, "explanation": "BM25 matches terms.",
+                "evidence_id": "E1",
+            }]})
+
+    provider = QuizProvider(service, VisionQuizGenerator(Model()))
+    quiz = provider(QuizRequest((chosen.doc_id,), "BM25", 1, 42))
+    assert quiz.questions[0].evidence.doc_id == chosen.doc_id
+    assert quiz.questions[0].evidence.doc_id != foreign.doc_id
+    session = QuizSession(quiz)
+    view = session.student_view()
+    assert set(view["questions"][0]) == {"prompt", "options"}
+    result = session.submit([view["questions"][0]["options"].index("BM25")])
+    assert result["score"] == 1
+    evidence = result["feedback"][0]["evidence"]
+    assert evidence["document"] == "Lecture.pdf" and evidence["page"] == 1
+    assert evidence["excerpt"].startswith("BM25 matches terms")
+    assert bool(evidence["image_path"]) is (not missing_image)

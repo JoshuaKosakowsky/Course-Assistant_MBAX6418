@@ -1,8 +1,10 @@
 # Quiz integration contract (Issues #6, #7; PR #15 dependency)
 
-This contract separates the merged offline quiz core from the model/provider
-slice and the still-unmerged retrieval/UI work. Issue #6 owns the callable
-provider; Issue #7 owns the Gradio UI. Offline tests do not prove live grounding.
+This contract separates the offline quiz core and model/provider slice from
+remaining live-model and UI work. Retrieval from PR #15 is now merged and its
+real classes are exercised offline with synthetic PDFs and a fake model.
+Issue #6 owns the callable provider; Issue #7 owns the Gradio UI. These tests
+do not prove live grounding.
 
 ## Evidence from PR #15
 
@@ -23,7 +25,8 @@ tuple of `EvidenceRef`:
 - This adapter does **not** validate file ownership, manifest membership, or
   whether a generated answer is factually supported. The production retriever
   must supply manifest-validated evidence before use. Synthetic unit tests
-  validate only the shape and gates, not the unmerged retrieval implementation.
+  validate the adapter's shape and gates. A separate synthetic-PDF smoke test
+  exercises the merged retrieval implementation; neither proves live grounding.
 - `QuizRequest.materials` contains **unique document IDs** (`EvidenceRef.doc_id` /
   `EvidenceItem.doc_id`), never filenames. The document store permits
   different files with identical filenames (records are keyed by content
