@@ -132,7 +132,8 @@ class QuizVisionClient:
             response = self._session.post(
                 self._base_url + "/chat/completions",
                 headers={"Authorization": "Bearer " + self._api_key},
-                json={"model": self._model, "messages": messages, "temperature": 0, "max_tokens": 8192},
+                json={"model": self._model, "messages": messages, "temperature": 0,
+                      "max_tokens": 8192, "response_format": {"type": "json_object"}},
                 timeout=self._timeout,
                 allow_redirects=False,
             )

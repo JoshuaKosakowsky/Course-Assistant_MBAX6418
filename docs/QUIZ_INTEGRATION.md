@@ -3,8 +3,9 @@
 This contract separates the offline quiz core and model/provider slice from
 remaining live-model and UI work. Retrieval from PR #15 is now merged and its
 real classes are exercised offline with synthetic PDFs and a fake model.
-Issue #6 owns the callable provider; Issue #7 owns the Gradio UI. These tests
-do not prove live grounding.
+A separate opt-in suite exercises the real quiz model using synthetic PDFs.
+Issue #6 owns the callable provider; Issue #7 owns the Gradio UI. Structural
+validation and a small synthetic live sample do not prove general grounding.
 
 ## Evidence from PR #15
 
@@ -74,6 +75,11 @@ question generation. The client reads `BASE_URL_VISION`, `CLASS_API_KEY`, and
 `VISION_MODEL` from existing server-side config. The URL must be HTTP(S) with
 no embedded credentials, query, or fragment; reserved port 9000 is refused.
 No keys, source paths, or raw server/transport errors belong in browser output.
+Chat requests explicitly set `response_format={"type":"json_object"}`. The
+class vision service supports this mode; prompt instructions alone produced
+Markdown-fenced JSON in live tests. The parser still rejects fences, extra
+fields, invalid options, and invented evidence IDs. Unsupported server modes
+fail safely; there is no retry using weaker output validation.
 
 The model receives evidence records labeled `E1`, `E2`, etc., and local image
 content when present. Evidence is untrusted input, not instructions. It must
@@ -95,8 +101,7 @@ artifact paths. Do not expose these APIs to arbitrary client-created packs
 or paths. Images are encoded in memory for the model; original paths remain
 unchanged for feedback. The UI must validate/serve original evidence safely.
 
-Integration sketch **after** retrieval and UI prerequisites land (these imports
-are deliberately not made by this branch):
+Integration sketch: retrieval is merged; the UI still needs explicit wiring:
 
 ```python
 from app.quiz_model import QuizVisionClient, VisionQuizGenerator
@@ -122,6 +127,48 @@ These use injected fake responses and synthetic artifacts. They exercise image
 encoding, selected-material scope, schema validation, error concealment, and
 session scoring/reveal, **not** live endpoint correctness or a real Gradio flow.
 
+### Opt-in live quiz verification
+
+Set the real server-side `BASE_URL_VISION`, `CLASS_API_KEY`, and `VISION_MODEL`
+in your local gitignored `.env` or process environment. Then run deliberately:
+
+```bash
+RUN_LIVE_QUIZ=1 python -m pytest tests/e2e/test_quiz_live.py -m e2e -q
+```
+
+The assignment requires a deliberate opt-in for shared-service usage. The file
+is marked `e2e`, excluded from the default/CI selection, and skips without
+`RUN_LIVE_QUIZ=1` or complete non-placeholder vision settings. It does not
+print or persist credentials, headers, raw responses, or screenshots. Do not
+use pytest's `--showlocals` with real credentials. It generates its own temporary
+PDFs; no course files or committed fixture content are needed.
+
+Four cases cover real PDF parsing/BM25 retrieval into the real provider/model
+and quiz session: original-image generation, missing-image text fallback,
+unsupported-topic rejection before a model call, and safe handling of one
+intentionally invalid synthetic credential. The valid cases use same-name
+PDFs with different identities, check the known correct duration, preserve
+original source feedback, hide the key until submit/reveal, reject invalid
+answers, and verify correct/incorrect scoring. Semantic retrieval, visual
+indexing, reranking, browser events, and image-only discovery are **not**
+exercised by this file.
+
+On Windows, the new original-image case failed against unchanged merged main
+`f2b7001`; with server JSON mode, the four cases passed. The request-payload
+unit regression separately failed before the fix. Broader exploratory live
+checks also found source-supported synthetic questions, but independent
+regeneration changed wording/options and answer positions with the same seed.
+A live pass does not certify all future generated answers or establish replay.
+
+The exploratory run also exposed separate setup/visual-index limitations:
+nonempty `.env` model names and the rerank key may still be template values;
+compare model names with authenticated `/models` output without logging keys.
+A rendered 396x512 JPEG sent as a plain data-URI `input` to the visual embedder
+was rejected with HTTP 400; the same image in the endpoint's documented
+multimodal `messages` input succeeded. That visual-client change, stable
+regeneration/replay, and general factual-answer evaluation are outside this
+JSON-mode fix. No local `.env` values or teammate branches are changed here.
+
 ## Issue #7 UI event boundary
 
 Keep `Quiz` and `QuizSession` **on the server**. Never place them, their repr,
@@ -145,8 +192,9 @@ expiration, and cleanup before enabling a multi-user UI.
 
 `tests/smoke/test_quiz_ui_contract.py` exercises this sequence with plain
 handler functions and synthetic evidence. It is **not** a Gradio/browser test,
-not concurrent-session proof, and not a live endpoint test. Before merging
-with #15 and #7, add a real combined integration test (including visual-only
+not concurrent-session proof, and not a live endpoint test. Retrieval integration
+is tested separately through real merged classes. Before claiming the full
+student-facing flow, add combined browser verification (including visual-only
 source, malformed evidence, image ownership and multi-user isolation), rerun
-Windows offline tests, and run opt-in live endpoint checks with gitignored
-credentials. Issue #6 remains open until the full quiz flow is verified.
+Windows offline tests, and verify any additional live service stages with
+gitignored credentials. Issue state alone does not establish acceptance.
