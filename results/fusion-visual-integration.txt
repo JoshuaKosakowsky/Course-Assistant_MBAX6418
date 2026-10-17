@@ -1,0 +1,36 @@
+============================================================================================
+FUSION + VISUAL INTEGRATION (Issue #4 Step 4) — LIVE: real 9003 visual
+embeddings (Qwen3-VL-Embedding-2B, 2048-dim, 512px-downscaled renders)
+indexed through MSpanny's VisualIndex class; real 9002 text vectors;
+real 9004 multimodal reranking on pages.
+============================================================================================
+
+Q: 'Which page shows a free cash flow chart?'  (expected: finance.pdf p3)
+   real 9003 visual hits: [('operations.pdf', 1), ('finance.pdf', 1), ('finance.pdf', 2), ('marketing.pdf', 2)]
+   text fused top-3 (no visual): [('finance.pdf', 1, 0.016), ('marketing.pdf', 1, 0.016), ('marketing.pdf', 2, 0.016)]
+   -> reranked top-1: finance.pdf p1 [expected pos: 2]
+   visual stage: ok
+      #1 finance.pdf p1 methods=['vector', 'visual'] img=artifact score=0.609
+      #2 finance.pdf p3 methods=['vector'] img=artifact score=0.542
+      #3 finance.pdf p2 methods=['vector', 'visual'] img=artifact score=0.351
+   expected-doc position: no-visual=2 -> visual=2  (unchanged)
+
+Q: 'What is brand positioning?'  (expected: marketing.pdf p1)
+   real 9003 visual hits: [('operations.pdf', 1), ('finance.pdf', 1), ('marketing.pdf', 2), ('finance.pdf', 2)]
+   text fused top-3 (no visual): [('marketing.pdf', 1, 0.016), ('marketing.pdf', 2, 0.016), ('marketing.pdf', 3, 0.016)]
+   -> reranked top-1: marketing.pdf p1 [expected pos: 1]
+   visual stage: ok
+      #1 marketing.pdf p1 methods=['vector'] img=artifact score=0.781
+      #2 marketing.pdf p3 methods=['vector'] img=artifact score=0.405
+      #3 marketing.pdf p2 methods=['vector', 'visual'] img=artifact score=0.289
+   expected-doc position: no-visual=1 -> visual=1  (unchanged)
+
+Q: 'How do companies manage inventory costs?'  (expected: operations.pdf p1)
+   real 9003 visual hits: [('operations.pdf', 1), ('marketing.pdf', 2), ('finance.pdf', 1), ('operations.pdf', 2)]
+   text fused top-3 (no visual): [('marketing.pdf', 1, 0.016), ('marketing.pdf', 2, 0.016), ('operations.pdf', 3, 0.016)]
+   -> reranked top-1: operations.pdf p1 [expected pos: 1]
+   visual stage: ok
+      #1 operations.pdf p1 methods=['vector', 'visual'] img=artifact score=0.593
+      #2 operations.pdf p2 methods=['vector', 'visual'] img=artifact score=0.344
+      #3 operations.pdf p3 methods=['vector'] img=artifact score=0.333
+   expected-doc position: no-visual=1 -> visual=1  (unchanged)
