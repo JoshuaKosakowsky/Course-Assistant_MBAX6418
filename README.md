@@ -2,255 +2,402 @@
 
 ![CI](https://github.com/JoshuaKosakowsky/Course-Assistant_MBAX6418/actions/workflows/ci.yml/badge.svg)
 
-A course assistant that answers questions and generates practice quizzes from
-course materials (slides, syllabus, and other files downloaded from Canvas).
-Built on hybrid RAG: keyword search + text embeddings + visual embeddings,
-with source-grounded evidence — including original page/slide images.
+A Python + Gradio course assistant for studying materials downloaded from
+Canvas. It combines keyword search, text embeddings, and visual embeddings
+with evidence packs containing excerpts and original page/slide images.
+Backend modules support source-grounded Q&A and multiple-choice quizzes.
 
-**Status:** Phase 1 ingestion (PDF/PPTX → text + page images, CLI +
-management UI) and Phase 2 text chunking, BM25 keyword search, and ChromaDB
-semantic indexing are implemented. PPTX conversion has been exercised and
-spot-checked on representative course decks. The complete end-to-end Q&A/quiz
-pipeline is not yet integrated. Work breakdown, ownership, and completion
-checks live in [PLAN.md](PLAN.md) and the GitHub issues.
+**Status:** Backend components for Phases 1–6 are merged into `main`, and
+CI is green; that does not mean every phase is fully integrated or
+validated. Issues #7 (Gradio student flow) and #8 (automated checks +
+design comparison) still have outstanding acceptance items. The Ask
+Questions tab is a placeholder, and quiz generation needs explicit
+provider wiring at startup. See [limitations](#limitations-and-untested-areas).
 
----
+**CI is green:** the checked `main` run reports **838 passed, 2 skipped,
+14 deselected** (roughly 840 offline unit/smoke checks). See the
+[verified CI run](https://github.com/JoshuaKosakowsky/Course-Assistant_MBAX6418/actions/runs/39006183798).
+Live e2e tests are opt-in and excluded from CI. Older test counts in results
+artifacts describe those historical runs, not the current suite.
 
-## Features (planned)
+## Implemented features
 
-- **Ingest** course files (PDF and other formats — exact list TBD and
-  documented once decided). Preserve text *and* original page/slide images,
-  keeping source metadata (document, page/slide, section).
-- **Q&A** grounded in the materials, including diagrams and charts, with
-  structured `{answer, sources}` output. Each source shows the document and
-  page/slide or section with an actual excerpt or screenshot. Missing
-  information is acknowledged — never invented, never fabricated citations.
-- **Quiz generation** by course material, with an optional topic filter.
-  Multiple-choice questions with scores and explanations. The answer key is
-  fixed; solutions are hidden until the student answers or requests them.
-  Feedback shows the document, page/slide, and source excerpt/image.
-
-## Architecture (target)
-
-```
-course files ──> parse (text + page/slide images)
-                    ├──> text chunks ──> keyword index (bm25s)  ─┐
-                    │                 └─> text embedding index ──┼─> fuse + rerank ─> evidence pack ─> LLM ─> {answer, sources}
-                    └──> page images ─> visual embedding index ──┘                     (incl. images)          Gradio UI
-```
-
-Text and visual indexes stay **separate**; results are combined and
-reranked before the best evidence (text + images) is passed to the LLM.
-
-## Setup
-
-```bash
-git clone <repo-url> && cd Course-Assistant_MBAX6418
-python -m venv .venv
-# Windows: .venv\Scripts\activate | macOS/Linux: source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env     # then fill in real values
-pytest                   # unit + smoke (offline)
-python -m app.ingest path/to/material.pdf  # add + parse a PDF
-python -m app.ui         # launch the Gradio management UI
-```
-
-**Sample corpus:** A syllabus and five lecture slide PDFs plus the five
-source PPTX decks are kept locally under `data/incoming/` (gitignored). All
-six PDFs (152 pages) and all five decks (145 slides) have been parsed; every
-page yielded text and a rendered image. Fifteen converted slides (first,
-middle, last per deck) were visually spot-checked. Course materials are not
-committed to this public repository.
-
-### Class services
-
-The LLM, embeddings, reranking, and document parsing run on the class
-endpoints at `dobolyi.com`, ports **9001 and above**. Connection details
-(keyed, per-service) come from the project team — see `.env.example` for the
-template. Fill `.env` locally; the file is gitignored.
-
-## Supported formats & conversion
-
-| Input | Handling | Extra software |
+| Area | Implemented behavior | Default launch availability |
 |---|---|---|
-| PDF | Parsed directly: per-page text + page images (150 dpi) | none |
-| PPTX | Auto-converted to PDF before parsing | **LibreOffice** (only for `.pptx` uploads) |
-| anything else | Rejected with a message naming the supported formats | — |
+| Materials | PDF/PPTX ingestion, content deduplication, listing, removal | CLI and Course Materials tab |
+| Parsing | Per-page text, metadata, original page PNGs | Local PDF parser; PPTX needs LibreOffice |
+| Keyword retrieval | BM25 over page-preserving text chunks | Library Lookup works without class calls |
+| Hybrid retrieval | BM25 + text vectors + separate visual vectors, fusion, optional rerank | Backend service; depends on configuration |
+| Q&A | Vision-model adapter, structured answers, citation/support checks | Backend implemented; Ask Questions tab unconnected |
+| Quiz | Evidence-scoped generation, fixed key, hidden solutions, scoring | UI handlers implemented; startup provider missing |
 
-**PPTX auto-conversion** uses headless LibreOffice, the same mechanism as
-manual export:
+- **Materials:** `python -m app.ingest` accepts PDF and PPTX. Content hashes
+  prevent duplicate imports. Removal deletes the registered corpus copy,
+  parse artifacts, and searchable content through registered index hooks.
+- **Retrieval:** BM25 and ChromaDB text vectors search the same chunks.
+  Visual vectors index page images separately. Reciprocal rank fusion (RRF)
+  combines ranked candidates; a class multimodal reranker can reorder them.
+  Stage warnings make unavailable semantic, visual, or rerank services visible.
+- **Evidence and Q&A:** evidence carries document identity, filename, physical
+  page number, excerpt, and image provenance. The Q&A backend prompts a
+  vision model for structured `{answer, sources}` output, validates citations,
+  checks support, and returns a missing-information fallback when validation
+  fails. These checks reduce risk; they do not prove factual correctness.
+- **Quiz:** choose document IDs, an optional topic, one to five questions,
+  and a seed. Each generated quiz has a fixed answer key held on the server.
+  Solutions stay hidden until submission or explicit reveal. Submission
+  scores answers; feedback includes explanations and source excerpts/images.
+  Revealing first ends the attempt without a score.
+- **Gradio:** Course Materials, Ask Questions, and Practice Quiz tabs exist,
+  plus a separate Lookup section. Only the connected flows should be treated
+  as usable from `python -m app.ui` without further integration.
 
-```bash
-soffice --headless --convert-to pdf --outdir <output_dir> <deck.pptx>
-```
+## Quick start from a clean clone
 
-The app locates `soffice` on PATH or in the standard Windows install
-locations; set `LIBREOFFICE_SOFFICE` in `.env` to point elsewhere. If
-LibreOffice is absent, the app returns a clear error — the acceptable
-workaround is exporting the deck to PDF manually and uploading the PDF.
-Converted slides are rendered as page images, so verify after conversion
-that the slide layout still looks correct (any layout regression shows up
-as a garbled page image in the UI).
-
-**Local verification:** LibreOffice 26.8.1 converted all five supplied lecture
-PPTX files successfully: 145/145 slides produced non-empty extracted text and
-rendered 150 dpi PNGs. Review output visually before relying on it; conversion
-fidelity beyond extraction/render completion is not guaranteed.
-
-> Status: PDF parsing is tested (unit + smoke). PPTX conversion is tested
-> locally against the five lecture decks above; see PLAN.md for the check.
-
-## Quiz engine (Issue #6, in progress)
-
-`app.quiz` and `app.quiz_generation` provide the offline quiz core.
-`QuizProvider(retriever, generator)` now implements `QuizRequest -> Quiz` for
-server-side UI use. It restricts retrieval and generated questions to unique
-selected document IDs. `VisionQuizGenerator(QuizVisionClient())` supplies the
-strict JSON vision-model adapter; configure `BASE_URL_VISION`, `CLASS_API_KEY`,
-and `VISION_MODEL` in the gitignored `.env`. Port 9000 is blocked.
-
-The model cites server-assigned evidence IDs, not invented source paths.
-Malformed responses and network failures produce safe errors, never fake
-questions. `QuizSession.student_view()` exposes only prompts and choices until
-`submit()` or explicit `reveal()`; scoring and source-bearing feedback follow.
-Answer placement is stable for the same seed **and identical generated
-questions**; a remote model is not guaranteed to regenerate identical output.
-
-Verify the core and adapter offline with:
+Use **Python 3.12**, the version exercised by CI, and Git. Install LibreOffice
+only if you want automatic PPTX conversion. Bring your own authorized course
+materials: the local `data/` corpus and real credentials are not committed.
 
 ```bash
-pytest tests/unit/test_quiz.py tests/unit/test_quiz_generation.py tests/unit/test_quiz_model.py tests/unit/test_quiz_provider.py tests/smoke/test_quiz_flow.py tests/smoke/test_quiz_provider_flow.py
+git clone https://github.com/JoshuaKosakowsky/Course-Assistant_MBAX6418.git
+cd Course-Assistant_MBAX6418
+python -m venv .venv
 ```
 
-Tests inject fake retrieval/model responses and synthetic page images. The
-adapter has **not** been exercised against a live class model. Production
-retrieval/UI hookup, factual-answer evaluation, cross-generation replay, and
-live end-to-end validation remain pending; valid source identity is not proof
-that a generated answer is correct. From eight retrieved candidates, the
-provider retains at most four image-bearing references plus text-only evidence,
-in ranked order; this is sampled coverage, not an exhaustive document review.
-Topic filtering remains literal excerpt matching (not semantic filtering), and
-excludes image-only pages when a topic
-is provided. See [docs/QUIZ_INTEGRATION.md](docs/QUIZ_INTEGRATION.md) for the
-integration sketch, image trust boundary, and remaining acceptance gates.
-
-## Security (class policy)
-
-- Keys live **only** in server-side environment variables or the local
-  `.env` — never in the UI, browser code, logs, errors, screenshots,
-  documentation, test output, or GitHub.
-- Committed config examples contain **dummy values only** (`.env.example`).
-
-## Testing
-
-Repeatable automated checks (pytest) run per phase — see PLAN.md. Test
-results, screenshots, and findings are saved in the repo so the team can
-review what was verified and what remains unchecked.
-
-## Team
-
-- Ownership of substantial tasks via GitHub issues (with completion checks).
-- Work flows through branches, commits, pull requests, and reviews.
-
-## Text retrieval & indexing (Phase 2)
-
-Uploaded documents are parsed into page text and chunked, then indexed for
-keyword search (BM25) and semantic search (ChromaDB text vectors). Retrieval,
-fusion, reranking, and Q&A are later phases.
-
-### Launch
+Activate it on macOS/Linux:
 
 ```bash
-python -m app.ui          # management UI: upload, list, remove materials
+source .venv/bin/activate
 ```
 
-Startup wires the indexer automatically: BM25 is rebuilt from the library and
-parsed artifacts, ChromaDB reuses existing vectors (no re-embedding), and
-deleting a document purges both indexes.
+Or in Windows PowerShell:
 
-### Lookup in the Library PDFs
+```powershell
+.\.venv\Scripts\Activate.ps1
+```
 
-A **Lookup** section below the document-removal controls accepts a question. Select **Look up**
-or press Enter to retrieve up to five matching text passages using the existing
-BM25 keyword index. Each result includes the PDF filename, physical page number
-(starting at 1), and a verbatim excerpt. This is source lookup, not an LLM-generated
-answer; no embedding or LLM endpoint is called by Lookup.
-
-Only currently registered `.pdf` files are searched, not source PPTX decks or
-deleted documents. New uploads use the existing indexing flow. Scanned/image-only
-pages require searchable extracted text; Lookup does not add OCR. Use specific
-terms from the PDFs if a natural-language question finds no useful passages.
-Questions are limited to 2,000 characters; empty input, no matches, unavailable
-indexes, and retrieval failures receive explanatory messages. Excerpts and
-filenames are HTML-escaped. Lookup does not modify library files, and the existing
-add/remove handlers and event wiring are unchanged. Previously displayed results
-are a snapshot: submit a new lookup after changing the Library.
-
-Offline verification: `python -m pytest tests/smoke/test_lookup.py -q`.
-
-### Index / reindex from the command line
+Install dependencies with the activated environment:
 
 ```bash
-python -m app.indexing                       # index the whole library
-python -m app.indexing --reindex             # clear + rebuild both indexes
-python -m app.indexing --keyword-only        # skip semantic (vector) indexing
+pip install -r requirements.txt
 ```
 
-`--reindex` is the documented way to switch embedding models (Chroma locks
-the vector dimension at first insert; clearing resets it).
+Copy the dummy template on macOS/Linux or in Git Bash:
 
-### Keyword-only operation
+```bash
+cp .env.example .env
+```
 
-When embedding credentials or the class service are unavailable, the app
-starts in **keyword-only mode**: BM25 search works, semantic search and
-indexing report why they are disabled, and a fake embedder is never used
-outside tests. These states self-heal when the service returns (missing
-vectors are repaired at startup, not re-embedded blindly).
+In Windows PowerShell, the equivalent is:
 
-### Required configuration
+```powershell
+Copy-Item .env.example .env
+```
 
-Keys live in the gitignored `.env` (see `.env.example`):
+Edit **only the local, gitignored `.env`**. Obtain the actual endpoint details,
+authorized model IDs, and keys from the course/team. Replace dummy keys and
+placeholder model settings before live use. Do not paste keys into the README,
+source code, browser, screenshots, logs, test output, issues, or pull requests.
 
-- `BASE_URL_TEXT_EMBED` (class text-embedding endpoint), `TEXT_EMBED_MODEL`,
-  `CLASS_API_KEY` — semantic indexing and search (port 9002).
+| Configuration | Purpose |
+|---|---|
+| `CLASS_API_KEY` | Class vision and embedding clients |
+| `CLASS_API_KEY_RERANK` | Reranker key; client falls back to the shared key if unset |
+| `BASE_URL_VISION`, `VISION_MODEL` | Vision Q&A and quiz model |
+| `BASE_URL_TEXT_EMBED`, `TEXT_EMBED_MODEL` | Semantic text indexing/search |
+| `BASE_URL_VISUAL_EMBED`, `VISUAL_EMBED_MODEL` | Page-image and matching visual-space text embeddings |
+| `BASE_URL_RERANK`, `RERANK_MODEL` | Candidate reranking |
+| `BASE_URL_PARSE` | Template service setting; current PDF parsing is local |
+| `APP_HOST`, `APP_PORT` | Gradio bind address and port; defaults are `127.0.0.1:7860` |
 
-### Verified vs unverified
+The template points to course-provided services at `dobolyi.com`, ports
+**9001 and above**. Confirm service assignments with the team rather than
+assuming every template entry is deployable. **Port 9000 is reserved for
+Hermes operations and is never a class/application service.**
 
-- **Tested:** full offline unit + smoke suite (chunking, BM25, ChromaDB,
-  indexing workflow, startup, removal, restart persistence, embedding
-  outages); live opt-in text-embedding e2e against the class endpoint (port
-  9002); sample-corpus demos in `results/` (indexing, startup).
-- **Unverified:** real Canvas course materials (all automated fixtures are
-  synthetic); PPTX depends on LibreOffice (or export to PDF manually);
-  visual embeddings, fusion, reranking, and Q&A belong to later phases.
+`VISION_MODEL` must be replaced. Treat `VISUAL_EMBED_MODEL` in `.env.example`
+as a placeholder too: set it to a model confirmed through authenticated
+service discovery. A plausible model string alone does not establish access.
+Text and rerank model names have historical live evidence in `results/`;
+that evidence does not guarantee present service availability.
 
-## Contributing
+```bash
+python -m app.ui
+```
 
-- **Agents:** read [AGENTS.md](AGENTS.md) first — it governs AI coding agents.
-- **Contributors:** [CONTRIBUTING.md](CONTRIBUTING.md) — workflow, issue
-  claiming, bug reports, review expectations.
-- Commit conventions: [docs/COMMITS.md](docs/COMMITS.md)
-- Test tiers: [docs/TESTING.md](docs/TESTING.md) — `pytest` = unit + smoke;
-  `pytest -m e2e` needs class keys.
+Open **http://127.0.0.1:7860/** unless you changed the app host/port.
+In **Course Materials**, upload a PDF and select **Add to library**.
+The app parses it and attempts the configured indexing stages. Use **Lookup**
+to find exact passages; click **Look up** or press Enter.
 
-## Chunk-Size Comparison
+Startup rebuilds in-memory BM25 from the library and parsed artifacts and
+reuses existing text vectors. Missing vectors may require live embedding
+requests. With unavailable embeddings, keyword retrieval remains available;
+production never substitutes fake embeddings. A fresh clone starts empty.
 
-We evaluated three BM25 retrieval chunk sizes (250, 500,
-and 1,000 characters) using a repeatable synthetic dataset.
+The Ask Questions tab does not yet accept questions. Practice Quiz controls
+are present, but Generate reports that generation is not connected until a
+provider is passed to `build_ui`. Configuration alone does not wire either flow.
 
-| Chunk Size | Chunks | Accuracy@1 | Hit Rate@3 | MRR@3 |
-|------------|--------|------------|------------|-------|
-| 250        | 25     | 100%       | 100%       | 1.000 |
-| 500        | 13     | 100%       | 100%       | 1.000 |
-| 1000       | 7      | 100%       | 100%       | 1.000 |
+### CLI ingestion and indexing
 
-All three configurations performed equally on the
-synthetic evaluation queries. Smaller chunks produced
-more index entries without improving retrieval accuracy.
+```bash
+python -m app.ingest path/to/material.pdf
+python -m app.ingest path/to/slides.pptx
+python -m app.indexing
+```
 
-These findings do not establish the best chunk size for
-real course materials because the evaluation used
-synthetic data and BM25 retrieval only.
+Ingestion registers and parses the file; the separate indexing command builds
+retrieval indexes. The UI also indexes successful new uploads automatically.
+These indexing operations can call shared class services when configured.
 
-See [comparison results](results/chunk-size-comparison.csv)
-and [detailed findings](results/chunk-size-comparison.md).
+```bash
+python -m app.indexing --keyword-only
+python -m app.indexing --reindex
+python -m app.indexing --visual-backfill
+```
+
+- `--keyword-only` skips semantic and visual indexing for that command.
+- `--reindex` clears/rebuilds text indexes; use it when switching text
+  embedding models because stored vectors have a fixed dimension.
+- `--visual-backfill` explicitly re-embeds library page images. Startup does
+  not automatically perform a first full-library visual backfill. It fails
+  with a nonzero exit if the visual index is unavailable.
+
+### Supported formats and local storage
+
+| Input | Handling | Requirement |
+|---|---|---|
+| PDF | PyMuPDF text extraction and 150 dpi page PNG rendering | Python dependencies |
+| PPTX | Headless conversion to PDF, then the same parser | LibreOffice |
+| Other formats | Rejected with conversion guidance | Export to PDF first |
+
+The converter finds `soffice` on PATH or in standard Windows locations.
+Set `LIBREOFFICE_SOFFICE` in the local environment/`.env` for a custom path.
+Without LibreOffice, export the deck to PDF manually and upload that PDF.
+Inspect converted slide images before relying on their layout.
+
+`data/` is gitignored and holds local materials, library records, parsed
+artifacts, and persistent indexes. `DATA_ROOT` can override the storage root.
+Neither a clean clone nor the offline test suite needs the team's course files.
+
+## Architecture
+
+```text
+course PDF/PPTX -> parse locally (text + original page/slide images)
+                      |
+                      +-> page-preserving text chunks
+                      |       +-> keyword index (bm25s) -----------+
+                      |       +-> text embedding index (Chroma) --+
+                      |                                          |
+                      +-> page images -> visual embedding index --+
+                                                                 |
+                        RRF fusion + page aggregation <-----------+
+                                      |
+                           optional multimodal rerank
+                                      |
+                          evidence pack (text + images)
+                              /                   \
+                 vision Q&A backend          quiz provider + model
+                 {answer, sources}           server-held quiz/session
+                              \                   /
+                          Gradio integration boundary
+                    Q&A pending; quiz provider injection needed
+
+BM25 keyword index -> Library Lookup -> verbatim passages in Gradio
+```
+
+Text and visual indexes remain **separate**. Visual text queries use the same
+visual model as image indexing; equal vector dimensions do not make the
+text-embedding model interchangeable with the visual model.
+
+Fusion preserves contributing methods and source identity. Page aggregation
+limits the advantage of long pages with many chunks. Original manifest-vetted
+images remain the citation authority; resized embedding copies do not replace
+originals. Unverified external visual hits must not become cited originals.
+
+Core entry points are [ingest](app/ingest.py), [indexing](app/indexing.py),
+[retrieval](app/retrieval.py), [Q&A](app/qna.py),
+[quiz provider](app/quiz_provider.py), and [Gradio UI](app/ui.py).
+For provider injection and evidence boundaries, read
+[QUIZ_INTEGRATION.md](docs/QUIZ_INTEGRATION.md).
+
+## Screenshots
+
+![Library Lookup showing a synthetic PDF excerpt with source and page](results/lookup-demo.png)
+
+This existing committed screenshot shows **Lookup**, using a generated
+synthetic PDF. It demonstrates source lookup, not generated Q&A or a live quiz.
+[lookup-check.md](results/lookup-check.md) records the browser verification.
+
+![Lookup — BM25 keyword retrieval on a synthetic deck](results/lookup-evidence-demo.png)
+
+A second **Lookup** capture (2026-10-17) on a three-slide synthetic deck:
+the query "What does RAG combine?" returns a verbatim excerpt with document
+name and page number. Lookup runs BM25 keyword search (`app/lookup.py`),
+so this demonstrates keyword retrieval on an indexed synthetic PDF — not
+the hybrid retrieval pipeline. Content shown is synthetic only.
+
+Q&A and quiz flow screenshots are being captured and will be added after the
+corresponding flows are connected and verified. They are not included here;
+no placeholder or generated screenshots stand in for working flows.
+
+## Findings and design decisions
+
+### Chunk size: fewer records, no measured quality difference
+
+The [chunk-size comparison](results/chunk-size-comparison.md) uses four
+synthetic pages, four queries, BM25 only, and 64-character overlap.
+
+| Chunk size (characters) | Chunks | Accuracy@1 | Hit Rate@3 | MRR@3 |
+|---|---:|---:|---:|---:|
+| 250 | 25 | 100% | 100% | 1.000 |
+| 500 | 13 | 100% | 100% | 1.000 |
+| 1,000 | 7 | 100% | 100% | 1.000 |
+
+Larger chunks reduced record count without changing measured retrieval on
+this easy synthetic set. This does not establish an optimum for real course
+questions or measure latency/memory. The code still defaults to **512-character
+chunks with 64-character overlap**; the comparison did not change that default.
+See the [CSV](results/chunk-size-comparison.csv) and
+[per-query details](results/chunk-size-details.json).
+
+### BM25 and semantic retrieval cover different failures
+
+The [BM25 demo](results/keyword-bm25-demo.txt) finds exact course vocabulary
+but misses “what is a firm worth” when the source uses different wording.
+The [semantic demo](results/semantic-search-demo.txt) retrieves finance for
+“company purchase price estimation” where BM25 finds nothing. It also ranks
+operations above finance for “what is a firm worth” on its tiny corpus.
+Embeddings help with wording changes but can still choose the wrong passage.
+
+The [fusion demo](results/fusion-demo.txt) supports keeping both retrieval
+methods: in its live section, keyword evidence corrects the semantic top
+result for “inventory management,” while semantic hits cover zero-match
+keyword queries. Its fake-embedding section checks mechanics, not meaning.
+These demos use different synthetic corpora and are not one shared benchmark.
+
+### Reranking helped this sample; images did not always help
+
+The [initial rerank demo](results/rerank-demo.txt) records both text-only and
+image-aware reranking with live services; expected documents were already
+first in its four examples, so it does not show a top-1 improvement.
+The later [evaluation](results/e2e-evaluation.txt) scores exact source pages
+for five answerable questions over three synthetic PDFs:
+
+| Retrieval stage | Correct top-1 pages | Relevant page in top 3 |
+|---|---:|---:|
+| Fusion, before rerank | 1/5 | 5/5 |
+| Text-only rerank | 5/5 | 5/5 |
+| Image-aware rerank | 4/5 | 5/5 |
+
+Use the [reconciled metrics](results/e2e-evaluation-metrics.txt): text-only
+reranking improved four questions versus fusion; image-aware improved three.
+Adding images worsened the chart question relative to text-only reranking.
+The out-of-scope sixth question still retrieved unrelated evidence and was
+excluded from accuracy scores. These are retrieval results, not generated
+answer accuracy or proof of reliable abstention.
+
+### Visual integration and hardening establish boundaries
+
+The [live visual integration log](results/fusion-visual-integration.txt)
+records three queries with visual retrieval and multimodal reranking. Expected
+page positions were unchanged; the chart page remained second. This shows a
+working integration path in that capture, not a demonstrated quality gain.
+
+The [offline hardening evaluation](results/hardening-eval.txt) uses fake
+embeddings. It checks that a visual-only page reaches reranking without an
+invented excerpt, page fusion avoids a many-chunk advantage, a mismatched
+image stays unverified, and visual-service failure preserves text evidence.
+It establishes behavior under those cases, not live retrieval quality.
+
+The [indexing demo](results/indexing-demo.txt) records index counts, removal,
+restart persistence, live CLI use, and recovery from vector-dimension mismatch.
+The [startup check](results/app-startup-check.txt) records HTTP 200 and no
+embedding requests when all required text vectors already existed. Its
+captured console output predates later visual startup wiring.
+
+## Testing and verification
+
+```bash
+pytest                  # default: offline unit + smoke
+pytest -m unit          # logic only
+pytest -m smoke         # component wiring on synthetic fixtures
+```
+
+CI runs `pytest -m "unit or smoke"` and a secret scan on pushes/PRs using
+Python 3.12. Unit/smoke tests inject model/embedding responses rather than
+calling shared endpoints. See [TESTING.md](docs/TESTING.md) for tier rules.
+
+Live checks are deliberate opt-in usage of the shared course infrastructure:
+
+```bash
+pytest -m e2e
+```
+
+They require complete local credentials, network access, and available services;
+unconfigured cases skip. Live quiz tests additionally require `RUN_LIVE_QUIZ=1`,
+as described in [QUIZ_INTEGRATION.md](docs/QUIZ_INTEGRATION.md).
+Visual request format and roundtrip scope are documented in
+[VISUAL_EMBEDDINGS.md](docs/VISUAL_EMBEDDINGS.md).
+
+## Limitations and untested areas
+
+- **Q&A UI is not wired.** `app/ui.py` displays a placeholder in Ask Questions;
+  there is no connected retrieval/model answer callback in that tab.
+- **Quiz startup is not wired.** The entry point calls `build_ui(store, indexer)`
+  without `quiz_provider`. Generate works only after supplying a provider;
+  filling `.env` does not make the current launch generate questions.
+- **Visual model configuration is provisional.** The model name in
+  `.env.example` is a placeholder requiring an authenticated model check.
+  The template must not be treated as a guarantee of service/model access.
+- **Image retrieval quality beyond same-image roundtrip is untested as a
+  general capability.** Historical live integration examples exist, but they
+  do not establish representative text-to-image or chart retrieval quality.
+  The current visual e2e scope is embedding/indexing/same-image roundtrip.
+- **Live use needs class services.** Semantic/visual indexing, reranking,
+  and model generation depend on course access and availability. Local PDF
+  parsing and BM25 Lookup work offline; full generation does not.
+- **Port 9000 is reserved for Hermes.** Never use it for a class service.
+- **Evidence validation is not factual proof.** Default Q&A support checking
+  uses heuristics; valid quiz source identity does not prove an answer correct.
+  Broad live factual-answer and adversarial evaluation remain outstanding.
+- **Synthetic evaluations are small.** Reported scores do not establish
+  performance on the full course corpus, real student questions, or other
+  courses. Unrelated retrieval for out-of-scope questions remains possible.
+- **Quiz coverage is sampled.** The provider retrieves eight candidates and
+  retains at most four image-bearing references plus text-only evidence.
+  It does not exhaustively review every selected document. Topic filtering
+  is literal excerpt matching and excludes image-only pages with a topic.
+- **A seed does not make remote generation repeatable.** Stable option
+  placement assumes identical generated questions. Optional server replay is
+  bounded and process-local; eviction/restart can yield a different generation.
+- **Parsing has practical limits.** Lookup needs extracted PDF text and adds
+  no OCR; it excludes original PPTX records. PPTX layout fidelity needs visual
+  review. Lookup results are snapshots; rerun after library changes.
+- **Verification remains incomplete.** A fresh-clone setup was not executed
+  for this README edit, and complete live browser Q&A/quiz flows, concurrent
+  user behavior, and representative retrieval quality are not established
+  by the committed results. No new live tests were run for this rewrite.
+
+## Repository conventions and navigation
+
+| Reference | Purpose |
+|---|---|
+| [AGENTS.md](AGENTS.md) | Operating rules for coding agents |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Human workflow, reviews, bug reports |
+| [PLAN.md](PLAN.md) | Phase goals and acceptance checks; some status text is historical |
+| [docs/](docs/) | Technical and collaboration documentation |
+| [COMMITS.md](docs/COMMITS.md) | Commit types, imperative subjects, 50-character subject limit |
+| [TESTING.md](docs/TESTING.md) | Offline unit/smoke and opt-in live e2e tiers |
+| [PERSONA.md](docs/PERSONA.md) | Evidence-first assistant behavior and voice |
+| [QUIZ_INTEGRATION.md](docs/QUIZ_INTEGRATION.md) | Provider wiring, evidence trust, replay, live quiz gates |
+| [VISUAL_EMBEDDINGS.md](docs/VISUAL_EMBEDDINGS.md) | Multimodal request format, model compatibility, verification scope |
+| [results/](results/) | Committed comparison logs, findings, and screenshot evidence |
+| [GitHub issues](https://github.com/JoshuaKosakowsky/Course-Assistant_MBAX6418/issues) | Ownership, remaining work, acceptance tracking |
+
+Use one issue, one branch, and one PR for each contribution. Claim the issue,
+follow commit conventions, run the appropriate offline checks, review the diff
+for secrets, and state what was tested and what remains untested in the PR.
+Real keys belong only in the local gitignored `.env`; committed examples must
+contain dummy values. Course materials remain local under gitignored storage.
